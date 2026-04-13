@@ -6,8 +6,15 @@ from typing import Any
 
 import polars as pl
 
+DEFAULT_MAX_ROWS: int = 1_000_000
 
-def execute_workflow(df: pl.DataFrame | pl.LazyFrame, payload: dict[str, Any]) -> list[dict[str, Any]]:
+
+def execute_workflow(
+    df: pl.DataFrame | pl.LazyFrame,
+    payload: dict[str, Any],
+    *,
+    max_rows: int | None = DEFAULT_MAX_ROWS,
+) -> list[dict[str, Any]]:
     """Execute a Graphic Walker IDataQueryPayload against a Polars DataFrame.
 
     The entire workflow is built as a lazy query plan and collected once at
@@ -19,6 +26,9 @@ def execute_workflow(df: pl.DataFrame | pl.LazyFrame, payload: dict[str, Any]) -
             - workflow: list of workflow steps
             - limit: optional row limit
             - offset: optional row offset
+        max_rows: Hard cap on the number of rows returned.  Applied after all
+            workflow steps and payload limit/offset.  Set to ``None`` to
+            disable.  Defaults to :data:`DEFAULT_MAX_ROWS` (1 000 000).
 
     Returns:
         A list of row dicts (IRow[]) suitable for returning to Graphic Walker.
@@ -40,6 +50,9 @@ def execute_workflow(df: pl.DataFrame | pl.LazyFrame, payload: dict[str, Any]) -
     if limit is not None:
         offset = payload.get("offset", 0) or 0
         lf = lf.slice(offset, limit)
+
+    if max_rows is not None:
+        lf = lf.head(max_rows)
 
     return _sanitize_for_json(lf)
 
