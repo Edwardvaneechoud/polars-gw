@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "gw-polars"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Native Polars computation engine for Graphic Walker — translates GW workflow payloads directly to Polars operations"
 readme = "README.md"
 license = "MIT"
@@ -23,16 +23,25 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Visualization",
+    "Typing :: Typed",
 ]
 dependencies = [
     "polars>=0.20.0",
 ]
 
-[project.optional-dependencies]
+[project.urls]
+Homepage = "https://github.com/Edwardvaneechoud/polars-gw"
+Repository = "https://github.com/Edwardvaneechoud/polars-gw"
+Issues = "https://github.com/Edwardvaneechoud/polars-gw/issues"
+
+[dependency-groups]
 dev = [
     "pytest>=7.0",
     "ruff>=0.4.0",
 ]
+
+[tool.hatch.version]
+path = "gw_polars/__init__.py"
 
 [tool.ruff]
 line-length = 120

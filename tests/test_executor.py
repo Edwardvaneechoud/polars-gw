@@ -3,10 +3,8 @@
 import datetime
 
 import polars as pl
-import pytest
 
 from gw_polars.executor import execute_workflow
-
 
 # ---------------------------------------------------------------------------
 # Helpers

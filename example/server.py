@@ -49,7 +49,7 @@ def load_data() -> pl.DataFrame:
             return pl.read_excel(path)
         else:
             print(f"  Error: unsupported file type: {suffix}")
-            print(f"  Supported: .csv, .parquet, .json, .xlsx")
+            print("  Supported: .csv, .parquet, .json, .xlsx")
             sys.exit(1)
 
     # Default: generate sample data
@@ -98,6 +98,6 @@ if __name__ == "__main__":
     print(f"\n  Source:  {source}")
     print(f"  Dataset: {DF.shape[0]} rows x {DF.shape[1]} columns")
     print(f"  Fields:  {[f['fid'] for f in FIELDS]}")
-    print(f"\n  Backend running on http://localhost:8787")
-    print(f"  Frontend should be on http://localhost:5177\n")
+    print("\n  Backend running on http://localhost:8787")
+    print("  Frontend should be on http://localhost:5177\n")
     uvicorn.run(app, host="0.0.0.0", port=8787)
