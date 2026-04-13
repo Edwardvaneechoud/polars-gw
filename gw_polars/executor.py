@@ -7,7 +7,7 @@ from typing import Any
 import polars as pl
 
 
-def execute_workflow(df: pl.DataFrame, payload: dict[str, Any]) -> list[dict[str, Any]]:
+def execute_workflow(df: pl.LazyFrame, payload: dict[str, Any]) -> list[dict[str, Any]]:
     """Execute a Graphic Walker IDataQueryPayload against a Polars DataFrame.
 
     Args:
@@ -37,11 +37,6 @@ def execute_workflow(df: pl.DataFrame, payload: dict[str, Any]) -> list[dict[str
         df = df.slice(offset, limit)
 
     return _sanitize_for_json(df)
-
-
-# ---------------------------------------------------------------------------
-# Filters
-# ---------------------------------------------------------------------------
 
 
 def _apply_filters(df: pl.DataFrame, filters: list[dict]) -> pl.DataFrame:
@@ -104,7 +99,7 @@ def _apply_single_filter(df: pl.DataFrame, fid: str, rule: dict) -> pl.DataFrame
 # ---------------------------------------------------------------------------
 
 
-def _apply_view_queries(df: pl.DataFrame, queries: list[dict]) -> pl.DataFrame:
+def _apply_view_queries(df: pl.LazyFrame, queries: list[dict]) -> pl.LazyFrame:
     for query in queries:
         op = query.get("op")
         if op == "aggregate":
@@ -118,7 +113,7 @@ def _apply_view_queries(df: pl.DataFrame, queries: list[dict]) -> pl.DataFrame:
     return df
 
 
-def _apply_aggregate(df: pl.DataFrame, query: dict) -> pl.DataFrame:
+def _apply_aggregate(df: pl.LazyFrame, query: dict) -> pl.LazyFrame:
     group_by = [g for g in query.get("groupBy", []) if g in df.columns]
     measures = query.get("measures", [])
 
@@ -163,7 +158,7 @@ def _build_agg_expr(field: str, agg: str) -> pl.Expr | None:
     return None
 
 
-def _apply_fold(df: pl.DataFrame, query: dict) -> pl.DataFrame:
+def _apply_fold(df: pl.DataFrame, query: dict) -> pl.LazyFrame:
     fold_by = [f for f in query.get("foldBy", []) if f in df.columns]
     key_col = query.get("newFoldKeyCol", "key")
     value_col = query.get("newFoldValueCol", "value")
