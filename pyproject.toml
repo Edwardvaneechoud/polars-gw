@@ -39,6 +39,11 @@ dev = [
     "pytest>=7.0",
     "ruff>=0.4.0",
 ]
+example = [
+    "fastapi>=0.110.0",
+    "uvicorn>=0.29.0",
+    "pydantic>=2.0.0",
+]
 
 [tool.hatch.version]
 path = "gw_polars/__init__.py"
