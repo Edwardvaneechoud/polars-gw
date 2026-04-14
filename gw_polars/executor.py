@@ -99,6 +99,8 @@ def _describe_view_query(query: dict) -> str:
     if op == "aggregate":
         group_by = query.get("groupBy", [])
         measures = [f"{m.get('agg')}({m.get('field')})" for m in query.get("measures", [])]
+        if not measures and group_by:
+            return f"distinct {group_by}"
         return f"aggregate by={group_by} measures=[{', '.join(measures)}]"
     if op == "fold":
         return f"fold on={query.get('foldBy', [])}"
@@ -202,6 +204,12 @@ def _apply_aggregate(lf: pl.LazyFrame, query: dict) -> pl.LazyFrame:
     schema = lf.collect_schema()
     group_by = [g for g in query.get("groupBy", []) if g in schema]
     measures = query.get("measures", [])
+
+    # No measures requested: Graphic Walker uses this to fetch the distinct
+    # values of a dimension (e.g. to populate a filter dropdown).  Without
+    # this branch we would fall through and return the entire DataFrame.
+    if not measures and group_by:
+        return lf.select(group_by).unique(maintain_order=True)
 
     agg_exprs: list[pl.Expr] = []
     for m in measures:
