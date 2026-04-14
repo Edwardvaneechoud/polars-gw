@@ -31,6 +31,34 @@ handle.stop()
 the Graphic Walker UI **bundled inside the wheel** (no CDN, no network
 required), and wires its computation callback to `execute_workflow`.
 
+### Logs
+
+By default `walk()` prints one line per compute call so you can see
+what GW is asking the backend for:
+
+```
+13:42:11  INFO    gw_polars.viz: Graphic Walker running on http://127.0.0.1:54221 — 12 000 000 rows x 19 cols, max_rows=1000000
+13:42:18  INFO    gw_polars.viz: compute: 2 step(s) → 847 row(s) in 142.3 ms
+13:42:24  INFO    gw_polars.viz: compute: 1 step(s) → 1000000 row(s) in 1284.7 ms [CAPPED]
+```
+
+`[CAPPED]` means the result hit `max_rows` and was truncated — Graphic
+Walker shows its **"Data Limit Reached"** toast in the UI when this
+happens.  Default cap is 1 000 000 rows; tune it with `max_rows=` or
+disable with `max_rows=None`.
+
+Quiet things down with `log_level="warning"`, or get more detail with
+`log_level="debug"`:
+
+```python
+walk(df, log_level="warning")   # only warnings and errors
+walk(df, max_rows=None)         # no row cap (use with care on big data)
+```
+
+If you've already configured Python logging yourself (`logging.basicConfig`,
+a framework, pytest's `caplog`, etc.), `walk()` won't overwrite it —
+it only attaches a console handler when nothing else owns logging.
+
 ## Usage
 
 ```python
@@ -179,16 +207,24 @@ Maintainers rebuild when bumping Graphic Walker:
 ```bash
 cd js
 npm install
-npm run build                 # writes into ../gw_polars/viz_assets/
+npm run build                 # one-shot production build
+```
+
+Or iterate with watch mode (rebuilds JS + CSS on save, source maps on):
+
+```bash
+npm run dev                   # in one shell
+uv run python example/walk_demo.py   # in another — refresh browser to pick up changes
 ```
 
 Bundle layout:
 
-- `graphic-walker.js` — Graphic Walker + React 19, minified IIFE (~4 MB)
-- `graphic-walker.css` — Tailwind-compiled stylesheet (~60 KB)
-- `versions.json` — pinned npm versions + build timestamp
+- `graphic-walker.js` — Graphic Walker + React 19.2.0, minified IIFE (~4.4 MB)
+- `graphic-walker.css` — Tailwind-compiled stylesheet (~57 KB)
+- `versions.json` — pinned npm versions + build mode + timestamp
 
-See `js/README.md` for details.
+See `js/README.md` for details (including why React is pinned to
+exactly `19.2.0`).
 
 ## License
 

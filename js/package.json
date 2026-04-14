@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "build": "node build.mjs",
-    "clean": "rimraf ../gw_polars/viz_assets"
+    "dev": "node build.mjs --watch",
+    "clean": "node -e \"require('node:fs').rmSync('../gw_polars/viz_assets/graphic-walker.js',{force:true});require('node:fs').rmSync('../gw_polars/viz_assets/graphic-walker.css',{force:true})\""
   },
   "dependencies": {
     "@kanaries/graphic-walker": "0.5.0",

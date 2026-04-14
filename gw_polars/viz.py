@@ -160,6 +160,34 @@ class WalkHandle:
         return f"WalkHandle(url={self.url!r})"
 
 
+def _ensure_console_logging(level: str) -> None:
+    """Attach a stderr handler to the ``gw_polars`` logger if none exists.
+
+    Library code normally shouldn't add handlers, but ``walk()`` is an
+    interactive entrypoint — without this, users running in the REPL or
+    a Jupyter notebook see nothing when execute_workflow logs request
+    timings or warns about row caps.
+
+    No-op if anyone (the user, a framework, pytest's caplog, etc.) has
+    already configured a handler on the package logger or the root
+    logger.  Idempotent: a sentinel attr makes repeated calls cheap.
+    """
+    pkg_logger = logging.getLogger("gw_polars")
+    pkg_logger.setLevel(level.upper())
+
+    if getattr(pkg_logger, "_gwp_console_attached", False):
+        return  # already installed by a previous walk() call
+    if pkg_logger.handlers or logging.getLogger().handlers:
+        return  # someone else owns logging output — don't double-print
+
+    h = logging.StreamHandler()
+    h.setFormatter(
+        logging.Formatter("%(asctime)s  %(levelname)-7s %(name)s: %(message)s", "%H:%M:%S")
+    )
+    pkg_logger.addHandler(h)
+    pkg_logger._gwp_console_attached = True  # type: ignore[attr-defined]
+
+
 def walk(
     df: pl.DataFrame | pl.LazyFrame,
     *,
@@ -167,6 +195,7 @@ def walk(
     port: int | None = None,
     open_browser: bool = True,
     max_rows: int | None = DEFAULT_MAX_ROWS,
+    log_level: str = "info",
 ) -> WalkHandle:
     """Launch a local Graphic Walker UI connected to ``df``.
 
@@ -182,7 +211,14 @@ def walk(
         open_browser: Whether to open the URL in the default browser.
         max_rows: Hard row cap applied to every compute response — see
             :func:`execute_workflow`.  Defaults to
-            :data:`gw_polars.DEFAULT_MAX_ROWS`.
+            :data:`gw_polars.DEFAULT_MAX_ROWS` (1 000 000).  When the cap
+            is hit, a WARNING is emitted and Graphic Walker shows its
+            "Data Limit Reached" toast in the UI.  Pass ``None`` to
+            disable the cap entirely.
+        log_level: Python logging level for the ``gw_polars`` logger
+            and for uvicorn's request logs.  Defaults to ``"info"`` so
+            you see compute timings + cap warnings in the REPL.  Set
+            to ``"warning"`` for less noise, ``"debug"`` for more.
 
     Returns:
         A :class:`WalkHandle` with ``.url`` and ``.stop()``.
@@ -191,6 +227,7 @@ def walk(
         ImportError: if the ``viz`` extras are not installed.
     """
     _require_viz()
+    _ensure_console_logging(log_level)
 
     if isinstance(df, pl.LazyFrame):
         df = df.collect()
@@ -220,10 +257,21 @@ def walk(
 
     @app.post("/api/compute")
     def _api_compute(request: ComputeRequest) -> list[dict[str, Any]]:
-        return execute_workflow(df, request.model_dump(), max_rows=max_rows)
+        t0 = time.monotonic()
+        rows = execute_workflow(df, request.model_dump(), max_rows=max_rows)
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        n_steps = len(request.workflow)
+        logger.info(
+            "compute: %d step(s) → %d row(s) in %.1f ms%s",
+            n_steps,
+            len(rows),
+            elapsed_ms,
+            " [CAPPED]" if max_rows is not None and len(rows) == max_rows else "",
+        )
+        return rows
 
     bind_port = _free_port() if port is None else port
-    config = uvicorn.Config(app, host=host, port=bind_port, log_level="warning")
+    config = uvicorn.Config(app, host=host, port=bind_port, log_level=log_level.lower())
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True, name="gw-polars-viz")
     thread.start()
@@ -235,7 +283,10 @@ def walk(
         time.sleep(0.05)
 
     url = f"http://{host}:{bind_port}"
-    logger.info("Graphic Walker running on %s (%d rows x %d cols)", url, df.shape[0], df.shape[1])
+    logger.info(
+        "Graphic Walker running on %s — %d rows x %d cols, max_rows=%s",
+        url, df.shape[0], df.shape[1], max_rows,
+    )
 
     if open_browser:
         try:
