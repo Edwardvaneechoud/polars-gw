@@ -338,22 +338,12 @@ def _apply_raw(lf: pl.LazyFrame, query: dict) -> pl.LazyFrame:
     return lf
 
 
-# ---------------------------------------------------------------------------
-# Sort
-# ---------------------------------------------------------------------------
-
-
 def _apply_sort(lf: pl.LazyFrame, by: list[str], sort_dir: str) -> pl.LazyFrame:
     schema = lf.collect_schema()
     by = [b for b in by if b in schema]
     if not by:
         return lf
     return lf.sort(by=by, descending=sort_dir == "descending")
-
-
-# ---------------------------------------------------------------------------
-# Transform (computed fields)
-# ---------------------------------------------------------------------------
 
 
 def _apply_transforms(lf: pl.LazyFrame, transforms: list[dict]) -> pl.LazyFrame:
@@ -424,6 +414,47 @@ _DATETIME_FEATURE_MAP: dict[str, str] = {
 }
 
 
+_DATETIME_DRILL_MAP: dict[str, str] = {
+    # GW drill unit → Polars dt.truncate interval string
+    "year": "1y",
+    "quarter": "1q",
+    "month": "1mo",
+    "week": "1w",
+    "day": "1d",
+    "hour": "1h",
+    "minute": "1m",
+    "second": "1s",
+}
+
+
+def _param_display_offset(params: list) -> int:
+    """Return the displayOffset (or offset) param as an int, or 0 if absent.
+
+    GW sends timezone offsets in JS ``Date.getTimezoneOffset()`` convention —
+    minutes, with positive meaning *behind* UTC.  We prefer ``displayOffset``
+    (the user's display TZ) and fall back to ``offset``.
+    """
+    chosen: int | None = None
+    fallback: int | None = None
+    for p in params:
+        if not isinstance(p, dict):
+            continue
+        ptype = p.get("type")
+        if ptype == "displayOffset":
+            v = p.get("value")
+            if isinstance(v, (int, float)):
+                chosen = int(v)
+        elif ptype == "offset":
+            v = p.get("value")
+            if isinstance(v, (int, float)):
+                fallback = int(v)
+    if chosen is not None:
+        return chosen
+    if fallback is not None:
+        return fallback
+    return 0
+
+
 def _build_transform_expr(expression: dict, schema: pl.Schema) -> pl.Expr | None:
     op = expression.get("op")
     params = expression.get("params", [])
@@ -454,16 +485,26 @@ def _build_transform_expr(expression: dict, schema: pl.Schema) -> pl.Expr | None
         return None
 
     if op == "bin":
+        # GW `bin`: equal-width binning, returns per-row [lowerBound, upperBound]
+        # in the field's native numeric scale.  The reference implementation is
+        # graphic-walker/src/lib/execExp.ts — it emits a 2-tuple per row and
+        # the frontend renders it as the chart's category label.
         field = _param_to_str(params[0]) if params else None
         num_bins = expression.get("num", 10)
         if field and field in schema:
             col = pl.col(field)
-            span = col.max() - col.min()
-            return (
-                pl.when(span > 0)
-                .then(((col - col.min()) / (span / num_bins)).floor().cast(pl.Int64).clip(0, num_bins - 1))
+            col_min = col.min()
+            step = (col.max() - col_min) / num_bins
+            # Clip so col.max() falls into the last bin rather than a phantom
+            # bin N (mirrors `if (bIndex === binSize) bIndex = binSize - 1;`).
+            idx = (
+                pl.when(step > 0)
+                .then(((col - col_min) / step).floor().cast(pl.Int64).clip(0, num_bins - 1))
                 .otherwise(0)
             )
+            lower = (col_min + idx * step).cast(pl.Float64)
+            upper = (col_min + (idx + 1) * step).cast(pl.Float64)
+            return pl.concat_list([lower, upper])
 
     elif op in ("log", "log2", "log10"):
         field = _param_to_str(params[0]) if params else None
@@ -472,11 +513,48 @@ def _build_transform_expr(expression: dict, schema: pl.Schema) -> pl.Expr | None
             return pl.col(field).log(base=base_map[op])
 
     elif op == "binCount":
+        # GW `binCount`: equal-frequency (quantile) binning, returns a
+        # 1-indexed bucket rank in 1..num.  Per execExp.ts, rows are sorted by
+        # value and split into `num` contiguous groups of ~N/num rows each.
         field = _param_to_str(params[0]) if params else None
+        num_bins = expression.get("num", 10)
         if field and field in schema:
-            return pl.col(field)
+            col = pl.col(field)
+            # ordinal rank breaks ties deterministically by input order, which
+            # matches the reference's stable sort.
+            order_index = col.rank(method="ordinal") - 1  # 0-indexed
+            group_size = col.count() / num_bins
+            return (
+                pl.when(group_size > 0)
+                .then((order_index / group_size).floor().cast(pl.Int64).clip(0, num_bins - 1) + 1)
+                .otherwise(1)
+            )
 
-    elif op in ("dateTimeDrill", "dateTimeFeature"):
+    elif op == "dateTimeDrill":
+        # Truncate a datetime to the start of the requested unit (year, month,
+        # day, …).  Returns a datetime/date — not an integer component (that's
+        # what dateTimeFeature is for).
+        field = _param_to_str(params[0]) if params else None
+        time_unit = _param_to_str(params[1]) if len(params) > 1 else "year"
+        if field and field in schema:
+            interval = _DATETIME_DRILL_MAP.get(time_unit or "year")
+            if interval is None:
+                _log(logging.WARNING, "  dateTimeDrill: unknown unit %r — skipping", time_unit)
+                return None
+            display_offset = _param_display_offset(params)
+            expr = pl.col(field)
+            # Shift into the user's display TZ so day/week/etc. boundaries
+            # align with the local calendar, then truncate, then shift back so
+            # the returned values stay in the source column's timezone.
+            if display_offset:
+                shift = pl.duration(minutes=display_offset)
+                expr = (expr - shift).dt.truncate(interval) + shift
+            else:
+                expr = expr.dt.truncate(interval)
+            return expr
+
+    elif op == "dateTimeFeature":
+        # Extract a numeric component (e.g. month → 3, dayOfWeek → 1).
         field = _param_to_str(params[0]) if params else None
         time_unit = _param_to_str(params[1]) if len(params) > 1 else "year"
         if field and field in schema:
@@ -484,11 +562,6 @@ def _build_transform_expr(expression: dict, schema: pl.Schema) -> pl.Expr | None
             return getattr(pl.col(field).dt, method)()
 
     return None
-
-
-# ---------------------------------------------------------------------------
-# JSON serialization
-# ---------------------------------------------------------------------------
 
 
 def _sanitize_for_json(lf: pl.LazyFrame) -> list[dict[str, Any]]:
@@ -509,4 +582,4 @@ def _sanitize_for_json(lf: pl.LazyFrame) -> list[dict[str, Any]]:
             cast_exprs.append(pl.col(col_name).cast(pl.Float64))
     if cast_exprs:
         lf = lf.with_columns(cast_exprs)
-    return lf.collect().to_dicts()
+    return lf.collect(engine="streaming").to_dicts()

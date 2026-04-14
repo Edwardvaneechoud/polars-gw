@@ -525,6 +525,11 @@ class TestSort:
 
 class TestTransform:
     def test_bin_transform(self):
+        """GW `bin` returns [lowerBound, upperBound] per row (equal-width binning).
+
+        Matches graphic-walker/src/lib/execExp.ts — the frontend renders the
+        pair as the chart's category label, not a bin index.
+        """
         df = pl.DataFrame({"age": [5, 15, 25, 35, 45, 55, 65, 75, 85, 95]})
         payload = {
             "workflow": [
@@ -535,9 +540,32 @@ class TestTransform:
         }
         result = execute_workflow(df, payload)
         assert all("age_bin" in r for r in result)
-        # 5 bins over 5-95, width = 18. bin(5)=0, bin(95)=4
-        assert result[0]["age_bin"] == 0
-        assert result[-1]["age_bin"] == 4
+        # 5 bins over [5, 95], step = 18.  First value (5) → [5, 23];
+        # last value (95) falls in the final bin → [77, 95].
+        assert result[0]["age_bin"] == [5.0, 23.0]
+        assert result[-1]["age_bin"] == [77.0, 95.0]
+        # Every row's bin is a 2-element list in the original numeric scale.
+        for row in result:
+            assert isinstance(row["age_bin"], list) and len(row["age_bin"]) == 2
+
+    def test_bin_count_transform(self):
+        """GW `binCount` returns a 1-indexed quantile-rank bucket in 1..num.
+
+        Equal-frequency binning: rows are sorted by value and split into
+        `num` contiguous groups of ~N/num rows each.
+        """
+        df = pl.DataFrame({"val": list(range(20))})
+        payload = {
+            "workflow": [
+                {"type": "transform", "transform": [
+                    {"key": "q", "expression": {"op": "binCount", "params": ["val"], "as": "q", "num": 4}}
+                ]}
+            ]
+        }
+        result = execute_workflow(df, payload)
+        qs = [r["q"] for r in result]
+        # 20 rows / 4 bins = 5 rows per bin, 1-indexed.
+        assert qs == [1] * 5 + [2] * 5 + [3] * 5 + [4] * 5
 
     def test_log_transform(self):
         df = pl.DataFrame({"val": [1.0, 10.0, 100.0]})
@@ -554,6 +582,7 @@ class TestTransform:
         assert abs(result[2]["log_val"] - 2.0) < 0.01
 
     def test_datetime_drill(self):
+        """dateTimeDrill truncates a datetime to the start of the unit (here: month)."""
         df = _temporal_df()
         payload = {
             "workflow": [
@@ -564,7 +593,8 @@ class TestTransform:
         }
         result = execute_workflow(df, payload)
         months = [r["month"] for r in result]
-        assert months == [1, 3, 6, 9, 12]
+        # Date columns are serialized as ISO strings by _sanitize_for_json.
+        assert months == ["2024-01-01", "2024-03-01", "2024-06-01", "2024-09-01", "2024-12-01"]
 
     def test_datetime_drill_dict_params(self):
         """GW sometimes wraps transform params as dicts: {"field": ...}, {"value": ...}."""
@@ -585,7 +615,51 @@ class TestTransform:
         }
         result = execute_workflow(df, payload)
         quarters = [r["quarter"] for r in result]
-        assert quarters == [1, 1, 2, 3, 4]
+        assert quarters == ["2024-01-01", "2024-01-01", "2024-04-01", "2024-07-01", "2024-10-01"]
+
+    def test_datetime_drill_display_offset(self):
+        """displayOffset shifts truncation boundaries into the user's local TZ.
+
+        The payload format mirrors what GW sends: params include
+        ``{"type": "displayOffset", "value": <minutes>}``.  Here -120 means
+        UTC+2, so a UTC timestamp at 22:30 should bucket into the *next*
+        local calendar day.
+        """
+        df = pl.DataFrame({"dt": [
+            datetime.datetime(2024, 3, 15, 22, 30),  # UTC = local 2024-03-16 00:30 (UTC+2)
+            datetime.datetime(2024, 3, 15, 23, 30),  # UTC = local 2024-03-16 01:30
+            datetime.datetime(2024, 3, 15, 1, 0),    # UTC = local 2024-03-15 03:00
+        ]})
+        payload = {
+            "workflow": [
+                {"type": "transform", "transform": [
+                    {
+                        "key": "day",
+                        "expression": {
+                            "op": "dateTimeDrill",
+                            "as": "day",
+                            "params": [
+                                {"type": "field", "value": "dt"},
+                                {"type": "value", "value": "day"},
+                                {"type": "offset", "value": -120},
+                                {"type": "displayOffset", "value": -120},
+                            ],
+                        },
+                    }
+                ]}
+            ]
+        }
+        result = execute_workflow(df, payload)
+        days = [r["day"] for r in result]
+        # First two rows fall on local 2024-03-16, third on local 2024-03-15.
+        # Returned values stay in the source's UTC frame, so local midnight of
+        # 2024-03-16 (UTC+2) is 2024-03-15 22:00:00 UTC, and local midnight of
+        # 2024-03-15 (UTC+2) is 2024-03-14 22:00:00 UTC.
+        assert days == [
+            "2024-03-15 22:00:00.000000",
+            "2024-03-15 22:00:00.000000",
+            "2024-03-14 22:00:00.000000",
+        ]
 
     def test_datetime_feature(self):
         """dateTimeFeature is the canonical GW op for extracting a temporal component."""

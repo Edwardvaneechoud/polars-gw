@@ -22,7 +22,7 @@ _TEMPORAL_DTYPES = (pl.Date, pl.Datetime, pl.Time, pl.Duration)
 
 
 def get_fields(
-    df: pl.DataFrame,
+    df: pl.DataFrame | pl.LazyFrame,
     *,
     field_overrides: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
