@@ -340,14 +340,26 @@ def _apply_transforms(lf: pl.LazyFrame, transforms: list[dict]) -> pl.LazyFrame:
         if not key or not expression:
             continue
         expr = _build_transform_expr(expression, lf.collect_schema())
-        if expr is not None:
-            lf = lf.with_columns(expr.alias(expression.get("as", key)))
+        if expr is None:
+            _log(
+                logging.WARNING,
+                "  skipping transform: op=%r params=%r (unsupported op or missing field)",
+                expression.get("op"),
+                expression.get("params"),
+            )
+            continue
+        lf = lf.with_columns(expr.alias(expression.get("as", key)))
     return lf
 
 
 def _build_transform_expr(expression: dict, schema: pl.Schema) -> pl.Expr | None:
     op = expression.get("op")
     params = expression.get("params", [])
+
+    # Graphic Walker's "Row Count" field: op="one" creates a constant-1 column
+    # that is then summed in a downstream aggregate to yield row counts.
+    if op == "one":
+        return pl.lit(1, dtype=pl.Int64)
 
     if op == "bin":
         field = params[0] if params else None

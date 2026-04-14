@@ -517,6 +517,38 @@ class TestTransform:
         months = [r["month"] for r in result]
         assert months == [1, 3, 6, 9, 12]
 
+    def test_one_transform_adds_constant_column(self):
+        """GW's 'Row Count' helper: op='one' creates a constant 1 column."""
+        payload = {
+            "workflow": [
+                {"type": "transform", "transform": [
+                    {"key": "gw_count_fid", "expression": {"op": "one", "params": [], "as": "gw_count_fid"}}
+                ]}
+            ]
+        }
+        result = execute_workflow(_sample_df(), payload)
+        assert all(r["gw_count_fid"] == 1 for r in result)
+
+    def test_row_count_workflow(self):
+        """End-to-end: GW's Row Count = one transform + sum aggregate."""
+        payload = {
+            "workflow": [
+                {"type": "transform", "transform": [
+                    {"key": "gw_count_fid", "expression": {"op": "one", "params": [], "as": "gw_count_fid"}}
+                ]},
+                {"type": "view", "query": [
+                    {
+                        "op": "aggregate",
+                        "groupBy": ["city"],
+                        "measures": [{"field": "gw_count_fid", "agg": "sum", "asFieldKey": "row_count"}],
+                    }
+                ]},
+            ]
+        }
+        result = execute_workflow(_sample_df(), payload)
+        result_map = {r["city"]: r["row_count"] for r in result}
+        assert result_map == {"Amsterdam": 2, "Berlin": 2, "Paris": 1}
+
 
 # ---------------------------------------------------------------------------
 # Workflow chain tests
