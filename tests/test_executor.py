@@ -250,6 +250,40 @@ class TestAggregate:
         # No valid agg exprs → returns original df unchanged
         assert len(result) == 5
 
+    def test_empty_measures_returns_distinct_group_by(self):
+        """GW sends aggregate with measures=[] to fetch distinct dimension values."""
+        payload = {
+            "workflow": [
+                {"type": "view", "query": [
+                    {"op": "aggregate", "groupBy": ["city"], "measures": []}
+                ]}
+            ]
+        }
+        result = execute_workflow(_sample_df(), payload)
+        # 3 unique cities: Amsterdam, Berlin, Paris
+        assert len(result) == 3
+        assert {r["city"] for r in result} == {"Amsterdam", "Berlin", "Paris"}
+        # Only the group-by column should be returned
+        assert set(result[0].keys()) == {"city"}
+
+    def test_empty_measures_multi_column_distinct(self):
+        """measures=[] with multiple groupBy cols → distinct combinations."""
+        payload = {
+            "workflow": [
+                {"type": "view", "query": [
+                    {"op": "aggregate", "groupBy": ["city", "category"], "measures": []}
+                ]}
+            ]
+        }
+        result = execute_workflow(_sample_df(), payload)
+        # Expect unique (city, category) pairs from the 5-row sample
+        pairs = {(r["city"], r["category"]) for r in result}
+        assert pairs == {
+            ("Amsterdam", "A"),
+            ("Berlin", "B"),
+            ("Paris", "A"),
+        }
+
 
 # ---------------------------------------------------------------------------
 # Fold tests
