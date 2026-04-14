@@ -499,3 +499,39 @@ class TestSanitization:
         result = execute_workflow(df, {"workflow": []})
         assert result[1]["a"] is None
         assert result[1]["b"] is None
+
+
+# ---------------------------------------------------------------------------
+# max_rows tests
+# ---------------------------------------------------------------------------
+
+
+class TestMaxRows:
+    def test_custom_max_rows(self):
+        result = execute_workflow(_sample_df(), {"workflow": []}, max_rows=3)
+        assert len(result) == 3
+
+    def test_max_rows_none_disables(self):
+        result = execute_workflow(_sample_df(), {"workflow": []}, max_rows=None)
+        assert len(result) == 5
+
+    def test_max_rows_smaller_than_payload_limit(self):
+        """max_rows caps even when payload limit is larger."""
+        payload = {"workflow": [], "limit": 4}
+        result = execute_workflow(_sample_df(), payload, max_rows=2)
+        assert len(result) == 2
+
+    def test_payload_limit_smaller_than_max_rows(self):
+        """Payload limit wins when it is smaller than max_rows."""
+        payload = {"workflow": [], "limit": 2}
+        result = execute_workflow(_sample_df(), payload, max_rows=100)
+        assert len(result) == 2
+
+    def test_default_cap_applied(self):
+        """Default max_rows (1M) is applied — result is capped, not unlimited."""
+        from gw_polars.executor import DEFAULT_MAX_ROWS
+
+        assert DEFAULT_MAX_ROWS == 1_000_000
+        # Just verify the parameter default works (don't allocate 1M+ rows)
+        result = execute_workflow(_sample_df(), {"workflow": []})
+        assert len(result) == 5  # 5 < 1M, so all rows returned
