@@ -424,6 +424,47 @@ _DATETIME_FEATURE_MAP: dict[str, str] = {
 }
 
 
+_DATETIME_DRILL_MAP: dict[str, str] = {
+    # GW drill unit → Polars dt.truncate interval string
+    "year": "1y",
+    "quarter": "1q",
+    "month": "1mo",
+    "week": "1w",
+    "day": "1d",
+    "hour": "1h",
+    "minute": "1m",
+    "second": "1s",
+}
+
+
+def _param_display_offset(params: list) -> int:
+    """Return the displayOffset (or offset) param as an int, or 0 if absent.
+
+    GW sends timezone offsets in JS ``Date.getTimezoneOffset()`` convention —
+    minutes, with positive meaning *behind* UTC.  We prefer ``displayOffset``
+    (the user's display TZ) and fall back to ``offset``.
+    """
+    chosen: int | None = None
+    fallback: int | None = None
+    for p in params:
+        if not isinstance(p, dict):
+            continue
+        ptype = p.get("type")
+        if ptype == "displayOffset":
+            v = p.get("value")
+            if isinstance(v, (int, float)):
+                chosen = int(v)
+        elif ptype == "offset":
+            v = p.get("value")
+            if isinstance(v, (int, float)):
+                fallback = int(v)
+    if chosen is not None:
+        return chosen
+    if fallback is not None:
+        return fallback
+    return 0
+
+
 def _build_transform_expr(expression: dict, schema: pl.Schema) -> pl.Expr | None:
     op = expression.get("op")
     params = expression.get("params", [])
@@ -476,7 +517,31 @@ def _build_transform_expr(expression: dict, schema: pl.Schema) -> pl.Expr | None
         if field and field in schema:
             return pl.col(field)
 
-    elif op in ("dateTimeDrill", "dateTimeFeature"):
+    elif op == "dateTimeDrill":
+        # Truncate a datetime to the start of the requested unit (year, month,
+        # day, …).  Returns a datetime/date — not an integer component (that's
+        # what dateTimeFeature is for).
+        field = _param_to_str(params[0]) if params else None
+        time_unit = _param_to_str(params[1]) if len(params) > 1 else "year"
+        if field and field in schema:
+            interval = _DATETIME_DRILL_MAP.get(time_unit or "year")
+            if interval is None:
+                _log(logging.WARNING, "  dateTimeDrill: unknown unit %r — skipping", time_unit)
+                return None
+            display_offset = _param_display_offset(params)
+            expr = pl.col(field)
+            # Shift into the user's display TZ so day/week/etc. boundaries
+            # align with the local calendar, then truncate, then shift back so
+            # the returned values stay in the source column's timezone.
+            if display_offset:
+                shift = pl.duration(minutes=display_offset)
+                expr = (expr - shift).dt.truncate(interval) + shift
+            else:
+                expr = expr.dt.truncate(interval)
+            return expr
+
+    elif op == "dateTimeFeature":
+        # Extract a numeric component (e.g. month → 3, dayOfWeek → 1).
         field = _param_to_str(params[0]) if params else None
         time_unit = _param_to_str(params[1]) if len(params) > 1 else "year"
         if field and field in schema:
