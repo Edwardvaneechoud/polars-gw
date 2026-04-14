@@ -18,6 +18,15 @@ const outDir = resolve(repoRoot, "gw_polars", "viz_assets");
 await mkdir(outDir, { recursive: true });
 
 // ---------------------------------------------------------------- JS
+// Force a single React / React-DOM instance for the whole bundle.  The
+// error #527 "Incompatible React versions" comes from two copies of
+// React ending up in the same bundle (one from our root node_modules,
+// another nested inside a transitive dep).  The `alias` map guarantees
+// every `import "react"` or `import "react-dom/*"` resolves to exactly
+// one path on disk.
+const reactRoot = resolve(__dirname, "node_modules", "react");
+const reactDomRoot = resolve(__dirname, "node_modules", "react-dom");
+
 await build({
   entryPoints: [resolve(__dirname, "entry.jsx")],
   bundle: true,
@@ -28,6 +37,13 @@ await build({
   platform: "browser",
   loader: { ".js": "jsx", ".jsx": "jsx" },
   jsx: "automatic",
+  alias: {
+    react: reactRoot,
+    "react-dom": reactDomRoot,
+    "react/jsx-runtime": resolve(reactRoot, "jsx-runtime.js"),
+    "react/jsx-dev-runtime": resolve(reactRoot, "jsx-dev-runtime.js"),
+    "react-dom/client": resolve(reactDomRoot, "client.js"),
+  },
   define: {
     "process.env.NODE_ENV": '"production"',
     "process.env.DEBUG": "false",
