@@ -17,13 +17,15 @@ Usage::
 
 from __future__ import annotations
 
+import json
 import logging
 import socket
 import threading
 import time
 import webbrowser
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import resources
+from pathlib import Path
 from typing import Any
 
 import polars as pl
@@ -35,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 try:
     import uvicorn
-    from fastapi import FastAPI
+    from fastapi import FastAPI, Request
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import HTMLResponse
     from fastapi.staticfiles import StaticFiles
@@ -46,13 +48,14 @@ try:
     class ComputeRequest(BaseModel):
         """Body of /api/compute — mirrors Graphic Walker's IDataQueryPayload."""
 
-        workflow: list = []
+        workflow: list[dict[str, Any]] = []
         limit: int | None = None
         offset: int | None = None
 
 except ImportError as _exc:  # pragma: no cover - exercised only without extras installed
     uvicorn = None  # type: ignore[assignment]
     FastAPI = None  # type: ignore[assignment]
+    Request = None  # type: ignore[assignment]
     CORSMiddleware = None  # type: ignore[assignment]
     HTMLResponse = None  # type: ignore[assignment]
     StaticFiles = None  # type: ignore[assignment]
@@ -60,9 +63,6 @@ except ImportError as _exc:  # pragma: no cover - exercised only without extras 
     _VIZ_IMPORT_ERROR = _exc
 
 
-# Location of the bundled viz assets inside the package.  Built from
-# `js/` by `npm run build` and shipped inside the wheel — see
-# `gw_polars/viz_assets/versions.json` for the exact pinned versions.
 _ASSETS_PACKAGE = "gw_polars.viz_assets"
 
 
@@ -112,6 +112,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
         await window.__gwpRender(document.getElementById("root"), {
           fieldsUrl: "/api/fields",
           computeUrl: "/api/compute",
+          specUrl: "/api/spec",
           appearance: "light",
         });
       } catch (e) {
@@ -147,16 +148,31 @@ class WalkHandle:
     """Handle returned by :func:`walk` — exposes the URL and a stop method."""
 
     url: str
-    _server: Any  # uvicorn.Server when extras installed
+    _server: Any
     _thread: threading.Thread
+    _spec_store: list = field(default_factory=list, repr=False)
+    _spec_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def stop(self, timeout: float = 5.0) -> None:
         """Signal the background server to shut down and wait for it."""
         self._server.should_exit = True
         self._thread.join(timeout=timeout)
 
-    # Convenience for interactive/REPL use
-    def __repr__(self) -> str:  # pragma: no cover - display only
+    def export(self, path: str | None = None) -> list[dict]:
+        """Return the current chart spec as a list of IChart dicts.
+
+        If *path* is given, the spec is also written to that file as
+        pretty-printed JSON.
+        """
+        with self._spec_lock:
+            spec = list(self._spec_store)
+        if path is not None:
+            p = Path(path)
+            p.write_text(json.dumps(spec, indent=2, ensure_ascii=False))
+            logger.info("Spec exported to %s (%d chart(s))", p, len(spec))
+        return spec
+
+    def __repr__(self) -> str:  # pragma: no cover
         return f"WalkHandle(url={self.url!r})"
 
 
@@ -191,6 +207,7 @@ def _ensure_console_logging(level: str) -> None:
 def walk(
     df: pl.DataFrame | pl.LazyFrame,
     *,
+    spec_file: str | None = None,
     host: str = "127.0.0.1",
     port: int | None = None,
     open_browser: bool = True,
@@ -207,6 +224,10 @@ def walk(
     Args:
         df: The DataFrame (or LazyFrame) to explore.  LazyFrames are
             collected eagerly so the field schema is stable.
+        spec_file: Path to a JSON file containing a saved Graphic Walker
+            chart spec (an ``IChart[]`` array).  When provided, the
+            charts are restored in the UI on load.  Use
+            :meth:`WalkHandle.export` to save a spec file.
         host: Interface to bind (default ``127.0.0.1``).
         port: Port to bind; an ephemeral free port is picked if ``None``.
         open_browser: Whether to open the URL in the default browser.
@@ -226,13 +247,27 @@ def walk(
             mis-labels a column (e.g. an int code that should be a measure).
 
     Returns:
-        A :class:`WalkHandle` with ``.url`` and ``.stop()``.
+        A :class:`WalkHandle` with ``.url``, ``.stop()``, and ``.export()``.
 
     Raises:
         ImportError: if the ``viz`` extras are not installed.
+        FileNotFoundError: if *spec_file* does not exist.
+        ValueError: if *spec_file* does not contain a JSON array.
     """
     _require_viz()
     _ensure_console_logging(log_level)
+
+    spec_lock = threading.Lock()
+    spec_store: list[dict] = []
+    if spec_file is not None:
+        p = Path(spec_file)
+        if not p.exists():
+            raise FileNotFoundError(f"Spec file not found: {p}")
+        raw = json.loads(p.read_text(encoding="utf-8"))
+        if not isinstance(raw, list):
+            raise ValueError(f"Spec file must contain a JSON array, got {type(raw).__name__}")
+        spec_store = raw
+        logger.info("Loaded %d chart(s) from %s", len(spec_store), p)
 
     fields = get_fields(df, field_overrides=field_overrides)
 
@@ -272,14 +307,28 @@ def walk(
         )
         return rows
 
+    @app.get("/api/spec")
+    def _api_spec_get() -> list[dict[str, Any]]:
+        with spec_lock:
+            return list(spec_store)
+
+    @app.post("/api/spec")
+    async def _api_spec_post(request: Request) -> dict[str, str]:
+        body = await request.json()
+        if not isinstance(body, list):
+            return {"status": "error", "detail": "expected a JSON array"}
+        with spec_lock:
+            spec_store.clear()
+            spec_store.extend(body)
+        logger.debug("Spec updated: %d chart(s)", len(body))
+        return {"status": "ok"}
+
     bind_port = _free_port() if port is None else port
-    config = uvicorn.Config(app, host=host, port=bind_port, log_level=log_level.lower())
+    config = uvicorn.Config(app, host=host, port=bind_port, log_level=log_level.lower(), timeout_keep_alive=60)
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True, name="gw-polars-viz")
     thread.start()
 
-    # Wait briefly for the server to finish starting so the browser
-    # doesn't get connection-refused on the first request.
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline and not server.started:
         time.sleep(0.05)
@@ -302,4 +351,4 @@ def walk(
         except Exception as e:  # noqa: BLE001 - browser failures are non-fatal
             logger.warning("Could not open browser automatically: %s", e)
 
-    return WalkHandle(url=url, _server=server, _thread=thread)
+    return WalkHandle(url=url, _server=server, _thread=thread, _spec_store=spec_store, _spec_lock=spec_lock)

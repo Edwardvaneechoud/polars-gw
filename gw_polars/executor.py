@@ -3,11 +3,27 @@
 from __future__ import annotations
 
 import contextvars
+import hashlib
+import json
 import logging
 import uuid
 from typing import Any
 
 import polars as pl
+
+from gw_polars.types import (
+    AggQuery,
+    BinQuery,
+    FieldTransform,
+    FilterRule,
+    FoldQuery,
+    IDataQueryPayload,
+    RawQuery,
+    SortDirection,
+    TransformExpression,
+    ViewQuery,
+    VisFilter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -22,10 +38,24 @@ def _log(level: int, msg: str, *args: Any) -> None:
 
 DEFAULT_MAX_ROWS: int = 1_000_000
 
+_CACHE_MAX_ENTRIES: int = 64
+_cache: dict[str, list[dict[str, Any]]] = {}
+
+
+def _cache_key(df_id: int, payload: IDataQueryPayload, max_rows: int | None) -> str:
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.md5(raw.encode(), usedforsecurity=False).hexdigest()
+    return f"{df_id}|{digest}|{max_rows}"
+
+
+def clear_cache() -> None:
+    """Drop all cached query results."""
+    _cache.clear()
+
 
 def execute_workflow(
     df: pl.DataFrame | pl.LazyFrame,
-    payload: dict[str, Any],
+    payload: IDataQueryPayload,
     *,
     max_rows: int | None = DEFAULT_MAX_ROWS,
 ) -> list[dict[str, Any]]:
@@ -33,6 +63,9 @@ def execute_workflow(
 
     The entire workflow is built as a lazy query plan and collected once at
     the end, letting Polars optimise predicate push-down and projection.
+
+    Results are cached by payload so that duplicate queries (common when
+    reshuffling fields in the UI) return instantly.
 
     Args:
         df: The source DataFrame (or LazyFrame) to query.
@@ -49,6 +82,12 @@ def execute_workflow(
     """
     rid_token = _request_id.set(uuid.uuid4().hex[:8])
     try:
+        key = _cache_key(id(df), payload, max_rows)
+        cached = _cache.get(key)
+        if cached is not None:
+            _log(logging.INFO, "execute_workflow: cache hit (%d row(s))", len(cached))
+            return cached
+
         lf = df.lazy() if isinstance(df, pl.DataFrame) else df
 
         workflow = payload.get("workflow", [])
@@ -113,12 +152,17 @@ def execute_workflow(
         _log(logging.INFO, "execute_workflow: returned %d row(s)", len(result))
         _log(logging.DEBUG, f"execute_workflow: returned {str(result[:min(len(result), 20)])}")
 
+        if len(_cache) >= _CACHE_MAX_ENTRIES:
+            evict_key = next(iter(_cache))
+            del _cache[evict_key]
+        _cache[key] = result
+
         return result
     finally:
         _request_id.reset(rid_token)
 
 
-def _describe_view_query(query: dict) -> str:
+def _describe_view_query(query: ViewQuery) -> str:
     """Short human-readable summary of a view query for logging."""
     op = query.get("op")
     if op == "aggregate":
@@ -141,7 +185,7 @@ def _describe_view_query(query: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _apply_filters(lf: pl.LazyFrame, filters: list[dict]) -> pl.LazyFrame:
+def _apply_filters(lf: pl.LazyFrame, filters: list[VisFilter]) -> pl.LazyFrame:
     """Combine all filter predicates into a single .filter() call."""
     schema = lf.collect_schema()
     exprs: list[pl.Expr] = []
@@ -161,7 +205,7 @@ def _apply_filters(lf: pl.LazyFrame, filters: list[dict]) -> pl.LazyFrame:
     return lf
 
 
-def _build_filter_expr(fid: str, rule: dict, schema: pl.Schema) -> pl.Expr | None:
+def _build_filter_expr(fid: str, rule: FilterRule, schema: pl.Schema) -> pl.Expr | None:
     rule_type = rule.get("type")
     value = rule.get("value")
 
@@ -222,7 +266,7 @@ def _build_filter_expr(fid: str, rule: dict, schema: pl.Schema) -> pl.Expr | Non
 # ---------------------------------------------------------------------------
 
 
-def _apply_view_queries(lf: pl.LazyFrame, queries: list[dict]) -> pl.LazyFrame:
+def _apply_view_queries(lf: pl.LazyFrame, queries: list[ViewQuery]) -> pl.LazyFrame:
     for query in queries:
         op = query.get("op")
         if op == "aggregate":
@@ -236,7 +280,7 @@ def _apply_view_queries(lf: pl.LazyFrame, queries: list[dict]) -> pl.LazyFrame:
     return lf
 
 
-def _apply_aggregate(lf: pl.LazyFrame, query: dict) -> pl.LazyFrame:
+def _apply_aggregate(lf: pl.LazyFrame, query: AggQuery) -> pl.LazyFrame:
     schema = lf.collect_schema()
     group_by = [g for g in query.get("groupBy", []) if g in schema]
     measures = query.get("measures", [])
@@ -308,7 +352,7 @@ def _build_agg_expr(field: str, agg: str) -> pl.Expr | None:
     return None
 
 
-def _apply_fold(lf: pl.LazyFrame, query: dict) -> pl.LazyFrame:
+def _apply_fold(lf: pl.LazyFrame, query: FoldQuery) -> pl.LazyFrame:
     schema = lf.collect_schema()
     fold_by = [f for f in query.get("foldBy", []) if f in schema]
     key_col = query.get("newFoldKeyCol", "key")
@@ -318,7 +362,7 @@ def _apply_fold(lf: pl.LazyFrame, query: dict) -> pl.LazyFrame:
     return lf.unpivot(on=fold_by, variable_name=key_col, value_name=value_col)
 
 
-def _apply_bin(lf: pl.LazyFrame, query: dict) -> pl.LazyFrame:
+def _apply_bin(lf: pl.LazyFrame, query: BinQuery) -> pl.LazyFrame:
     bin_by = query.get("binBy")
     new_col = query.get("newBinCol", f"{bin_by}_bin")
     bin_size = query.get("binSize", 10)
@@ -330,7 +374,7 @@ def _apply_bin(lf: pl.LazyFrame, query: dict) -> pl.LazyFrame:
     )
 
 
-def _apply_raw(lf: pl.LazyFrame, query: dict) -> pl.LazyFrame:
+def _apply_raw(lf: pl.LazyFrame, query: RawQuery) -> pl.LazyFrame:
     schema = lf.collect_schema()
     fields = [f for f in query.get("fields", []) if f in schema]
     if fields:
@@ -338,7 +382,7 @@ def _apply_raw(lf: pl.LazyFrame, query: dict) -> pl.LazyFrame:
     return lf
 
 
-def _apply_sort(lf: pl.LazyFrame, by: list[str], sort_dir: str) -> pl.LazyFrame:
+def _apply_sort(lf: pl.LazyFrame, by: list[str], sort_dir: SortDirection) -> pl.LazyFrame:
     schema = lf.collect_schema()
     by = [b for b in by if b in schema]
     if not by:
@@ -346,7 +390,7 @@ def _apply_sort(lf: pl.LazyFrame, by: list[str], sort_dir: str) -> pl.LazyFrame:
     return lf.sort(by=by, descending=sort_dir == "descending")
 
 
-def _apply_transforms(lf: pl.LazyFrame, transforms: list[dict]) -> pl.LazyFrame:
+def _apply_transforms(lf: pl.LazyFrame, transforms: list[FieldTransform]) -> pl.LazyFrame:
     for t in transforms:
         key = t.get("key")
         expression = t.get("expression", {})
@@ -442,11 +486,11 @@ def _param_display_offset(params: list) -> int:
         ptype = p.get("type")
         if ptype == "displayOffset":
             v = p.get("value")
-            if isinstance(v, (int, float)):
+            if isinstance(v, int | float):
                 chosen = int(v)
         elif ptype == "offset":
             v = p.get("value")
-            if isinstance(v, (int, float)):
+            if isinstance(v, int | float):
                 fallback = int(v)
     if chosen is not None:
         return chosen
@@ -455,7 +499,7 @@ def _param_display_offset(params: list) -> int:
     return 0
 
 
-def _build_transform_expr(expression: dict, schema: pl.Schema) -> pl.Expr | None:
+def _build_transform_expr(expression: TransformExpression, schema: pl.Schema) -> pl.Expr | None:
     op = expression.get("op")
     params = expression.get("params", [])
 

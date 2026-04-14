@@ -7,7 +7,7 @@ from typing import Any
 
 import polars as pl
 
-from gw_polars.types import AnalyticType, SemanticType
+from gw_polars.types import AnalyticType, IMutField, SemanticType
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ def get_fields(
     df: pl.DataFrame | pl.LazyFrame,
     *,
     field_overrides: dict[str, dict[str, Any]] | None = None,
-) -> list[dict[str, Any]]:
+) -> list[IMutField]:
     """Convert a Polars DataFrame schema to Graphic Walker IMutField[] format.
 
     Args:
@@ -53,10 +53,10 @@ def get_fields(
             ", ".join(sorted(unknown)),
         )
 
-    fields: list[dict[str, Any]] = []
+    fields: list[IMutField] = []
     for name, dtype in df.schema.items():
         semantic, analytic = _dtype_classify(dtype)
-        field: dict[str, Any] = {
+        field: IMutField = {
             "fid": name,
             "name": name,
             "basename": name,
