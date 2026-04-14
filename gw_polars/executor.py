@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import polars as pl
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_ROWS: int = 1_000_000
 
@@ -35,26 +38,75 @@ def execute_workflow(
     """
     lf = df.lazy() if isinstance(df, pl.DataFrame) else df
 
-    for step in payload.get("workflow", []):
+    workflow = payload.get("workflow", [])
+    logger.info("execute_workflow: %d step(s), max_rows=%s", len(workflow), max_rows)
+
+    for i, step in enumerate(workflow):
         step_type = step.get("type")
         if step_type == "filter":
-            lf = _apply_filters(lf, step.get("filters", []))
+            filters = step.get("filters", [])
+            logger.info(
+                "  step %d: filter — %s",
+                i,
+                ", ".join(f"{f.get('fid')} {f.get('rule', {}).get('type')}" for f in filters) or "(none)",
+            )
+            lf = _apply_filters(lf, filters)
         elif step_type == "view":
-            lf = _apply_view_queries(lf, step.get("query", []))
+            queries = step.get("query", [])
+            logger.info("  step %d: view — %s", i, ", ".join(_describe_view_query(q) for q in queries) or "(none)")
+            lf = _apply_view_queries(lf, queries)
         elif step_type == "sort":
-            lf = _apply_sort(lf, step.get("by", []), step.get("sort", "ascending"))
+            by = step.get("by", [])
+            direction = step.get("sort", "ascending")
+            logger.info("  step %d: sort — by=%s %s", i, by, direction)
+            lf = _apply_sort(lf, by, direction)
         elif step_type == "transform":
-            lf = _apply_transforms(lf, step.get("transform", []))
+            transforms = step.get("transform", [])
+            logger.info(
+                "  step %d: transform — %s",
+                i,
+                ", ".join(f"{t.get('expression', {}).get('op')}->{t.get('key')}" for t in transforms) or "(none)",
+            )
+            lf = _apply_transforms(lf, transforms)
+        else:
+            logger.warning("  step %d: unknown step type %r", i, step_type)
 
     limit = payload.get("limit")
     if limit is not None:
         offset = payload.get("offset", 0) or 0
+        logger.info("  slice: offset=%d, limit=%d", offset, limit)
         lf = lf.slice(offset, limit)
 
     if max_rows is not None:
         lf = lf.head(max_rows)
 
-    return _sanitize_for_json(lf)
+    result = _sanitize_for_json(lf)
+
+    if max_rows is not None and len(result) == max_rows:
+        logger.warning(
+            "Result capped at max_rows=%d — output may be truncated. "
+            "Pass a larger max_rows or max_rows=None to disable.",
+            max_rows,
+        )
+    logger.info("execute_workflow: returned %d row(s)", len(result))
+
+    return result
+
+
+def _describe_view_query(query: dict) -> str:
+    """Short human-readable summary of a view query for logging."""
+    op = query.get("op")
+    if op == "aggregate":
+        group_by = query.get("groupBy", [])
+        measures = [f"{m.get('agg')}({m.get('field')})" for m in query.get("measures", [])]
+        return f"aggregate by={group_by} measures=[{', '.join(measures)}]"
+    if op == "fold":
+        return f"fold on={query.get('foldBy', [])}"
+    if op == "bin":
+        return f"bin {query.get('binBy')} size={query.get('binSize', 10)}"
+    if op == "raw":
+        return f"raw fields={query.get('fields', [])}"
+    return f"{op}?"
 
 
 # ---------------------------------------------------------------------------

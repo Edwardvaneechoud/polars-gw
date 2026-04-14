@@ -19,6 +19,7 @@ Usage:
     # Open http://localhost:5177 in your browser
 """
 
+import logging
 import sys
 from pathlib import Path
 
@@ -30,15 +31,18 @@ from pydantic import BaseModel
 
 from gw_polars import execute_workflow, get_fields
 
+logger = logging.getLogger("gw_polars.example")
+
 
 def load_data() -> pl.DataFrame:
     """Load data from a file path (CLI arg) or generate sample data."""
     if len(sys.argv) > 1:
         path = Path(sys.argv[1])
         if not path.exists():
-            print(f"  Error: file not found: {path}")
+            logger.error("File not found: %s", path)
             sys.exit(1)
         suffix = path.suffix.lower()
+        logger.info("Loading %s (%s)", path, suffix)
         if suffix == ".csv":
             return pl.read_csv(path)
         elif suffix == ".parquet":
@@ -48,8 +52,7 @@ def load_data() -> pl.DataFrame:
         elif suffix in (".xlsx", ".xls"):
             return pl.read_excel(path)
         else:
-            print(f"  Error: unsupported file type: {suffix}")
-            print("  Supported: .csv, .parquet, .json, .xlsx")
+            logger.error("Unsupported file type: %s (supported: .csv, .parquet, .json, .xlsx)", suffix)
             sys.exit(1)
 
     # Default: generate sample data
@@ -101,16 +104,19 @@ def api_fields():
 
 @app.post("/api/compute")
 def api_compute(request: ComputeRequest):
-    result = execute_workflow(DF, request.model_dump())
-    print(f"  compute: {len(request.workflow)} steps -> {len(result)} rows")
-    return result
+    return execute_workflow(DF, request.model_dump())
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s  %(levelname)-7s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
     source = sys.argv[1] if len(sys.argv) > 1 else "sample data"
-    print(f"\n  Source:  {source}")
-    print(f"  Dataset: {DF.shape[0]} rows x {DF.shape[1]} columns")
-    print(f"  Fields:  {[f['fid'] for f in FIELDS]}")
-    print("\n  Backend running on http://localhost:8787")
-    print("  Frontend should be on http://localhost:5177\n")
+    logger.info("Source:  %s", source)
+    logger.info("Dataset: %d rows x %d columns", *DF.shape)
+    logger.info("Fields:  %s", [f["fid"] for f in FIELDS])
+    logger.info("Backend running on http://localhost:8787")
+    logger.info("Frontend should be on http://localhost:5177")
     uvicorn.run(app, host="0.0.0.0", port=8787)
