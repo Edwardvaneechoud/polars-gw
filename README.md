@@ -7,8 +7,29 @@ Translates Graphic Walker `IDataQueryPayload` workflow steps directly into Polar
 ## Installation
 
 ```bash
-pip install gw-polars
+pip install gw-polars              # core translator only
+pip install 'gw-polars[viz]'       # core + built-in walk() UI
 ```
+
+The core install only pulls in `polars`.  The `[viz]` extra adds FastAPI,
+uvicorn and pydantic so you can launch a local Graphic Walker against a
+DataFrame in one line.
+
+## Interactive UI
+
+```python
+import polars as pl
+from gw_polars import walk
+
+df = pl.read_parquet("sales.parquet")
+handle = walk(df)          # opens http://127.0.0.1:<free-port> in your browser
+# ...
+handle.stop()
+```
+
+`walk()` starts a FastAPI server in a background daemon thread, serves
+the Graphic Walker UI (loaded from jsdelivr), and wires its computation
+callback to `execute_workflow`.
 
 ## Usage
 
@@ -53,7 +74,7 @@ results = execute_workflow(df, payload)
 | `view/bin` | Numeric binning |
 | `view/raw` | Column selection |
 | `sort` | Ascending/descending sort |
-| `transform` | Computed fields (bin, log, dateTimeDrill) |
+| `transform` | Computed fields (bin, log/log2/log10, binCount, dateTimeDrill, dateTimeFeature, one, expr) |
 
 ### Field Inference
 
