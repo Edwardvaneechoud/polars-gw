@@ -525,6 +525,11 @@ class TestSort:
 
 class TestTransform:
     def test_bin_transform(self):
+        """GW `bin` returns [lowerBound, upperBound] per row (equal-width binning).
+
+        Matches graphic-walker/src/lib/execExp.ts — the frontend renders the
+        pair as the chart's category label, not a bin index.
+        """
         df = pl.DataFrame({"age": [5, 15, 25, 35, 45, 55, 65, 75, 85, 95]})
         payload = {
             "workflow": [
@@ -535,9 +540,32 @@ class TestTransform:
         }
         result = execute_workflow(df, payload)
         assert all("age_bin" in r for r in result)
-        # 5 bins over 5-95, width = 18. bin(5)=0, bin(95)=4
-        assert result[0]["age_bin"] == 0
-        assert result[-1]["age_bin"] == 4
+        # 5 bins over [5, 95], step = 18.  First value (5) → [5, 23];
+        # last value (95) falls in the final bin → [77, 95].
+        assert result[0]["age_bin"] == [5.0, 23.0]
+        assert result[-1]["age_bin"] == [77.0, 95.0]
+        # Every row's bin is a 2-element list in the original numeric scale.
+        for row in result:
+            assert isinstance(row["age_bin"], list) and len(row["age_bin"]) == 2
+
+    def test_bin_count_transform(self):
+        """GW `binCount` returns a 1-indexed quantile-rank bucket in 1..num.
+
+        Equal-frequency binning: rows are sorted by value and split into
+        `num` contiguous groups of ~N/num rows each.
+        """
+        df = pl.DataFrame({"val": list(range(20))})
+        payload = {
+            "workflow": [
+                {"type": "transform", "transform": [
+                    {"key": "q", "expression": {"op": "binCount", "params": ["val"], "as": "q", "num": 4}}
+                ]}
+            ]
+        }
+        result = execute_workflow(df, payload)
+        qs = [r["q"] for r in result]
+        # 20 rows / 4 bins = 5 rows per bin, 1-indexed.
+        assert qs == [1] * 5 + [2] * 5 + [3] * 5 + [4] * 5
 
     def test_log_transform(self):
         df = pl.DataFrame({"val": [1.0, 10.0, 100.0]})

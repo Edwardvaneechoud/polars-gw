@@ -495,16 +495,26 @@ def _build_transform_expr(expression: dict, schema: pl.Schema) -> pl.Expr | None
         return None
 
     if op == "bin":
+        # GW `bin`: equal-width binning, returns per-row [lowerBound, upperBound]
+        # in the field's native numeric scale.  The reference implementation is
+        # graphic-walker/src/lib/execExp.ts — it emits a 2-tuple per row and
+        # the frontend renders it as the chart's category label.
         field = _param_to_str(params[0]) if params else None
         num_bins = expression.get("num", 10)
         if field and field in schema:
             col = pl.col(field)
-            span = col.max() - col.min()
-            return (
-                pl.when(span > 0)
-                .then(((col - col.min()) / (span / num_bins)).floor().cast(pl.Int64).clip(0, num_bins - 1))
+            col_min = col.min()
+            step = (col.max() - col_min) / num_bins
+            # Clip so col.max() falls into the last bin rather than a phantom
+            # bin N (mirrors `if (bIndex === binSize) bIndex = binSize - 1;`).
+            idx = (
+                pl.when(step > 0)
+                .then(((col - col_min) / step).floor().cast(pl.Int64).clip(0, num_bins - 1))
                 .otherwise(0)
             )
+            lower = (col_min + idx * step).cast(pl.Float64)
+            upper = (col_min + (idx + 1) * step).cast(pl.Float64)
+            return pl.concat_list([lower, upper])
 
     elif op in ("log", "log2", "log10"):
         field = _param_to_str(params[0]) if params else None
@@ -513,9 +523,22 @@ def _build_transform_expr(expression: dict, schema: pl.Schema) -> pl.Expr | None
             return pl.col(field).log(base=base_map[op])
 
     elif op == "binCount":
+        # GW `binCount`: equal-frequency (quantile) binning, returns a
+        # 1-indexed bucket rank in 1..num.  Per execExp.ts, rows are sorted by
+        # value and split into `num` contiguous groups of ~N/num rows each.
         field = _param_to_str(params[0]) if params else None
+        num_bins = expression.get("num", 10)
         if field and field in schema:
-            return pl.col(field)
+            col = pl.col(field)
+            # ordinal rank breaks ties deterministically by input order, which
+            # matches the reference's stable sort.
+            order_index = col.rank(method="ordinal") - 1  # 0-indexed
+            group_size = col.count() / num_bins
+            return (
+                pl.when(group_size > 0)
+                .then((order_index / group_size).floor().cast(pl.Int64).clip(0, num_bins - 1) + 1)
+                .otherwise(1)
+            )
 
     elif op == "dateTimeDrill":
         # Truncate a datetime to the start of the requested unit (year, month,
