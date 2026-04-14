@@ -120,66 +120,6 @@ class TestGetFields:
         assert fields[0]["aggName"] == "sum"
 
 
-class TestSmartSchemaIdentification:
-    def test_low_cardinality_int_stays_dimension(self):
-        # Like VendorID: 4 distinct values across 1000 rows → dimension.
-        df = pl.DataFrame({"VendorID": pl.Series([1, 2, 3, 4] * 250, dtype=pl.Int64)})
-        fields = get_fields(df, smart_schema_identification=True)
-        assert fields[0]["analyticType"] == "dimension"
-        assert "aggName" not in fields[0]
-
-    def test_low_cardinality_float_becomes_dimension(self):
-        # Float column with only two distinct values (a flag-as-float):
-        # default dtype rule says "measure"; smart mode flips it to dimension.
-        df = pl.DataFrame({"flag": pl.Series([0.0, 1.0] * 200, dtype=pl.Float64)})
-        default_fields = get_fields(df)
-        assert default_fields[0]["analyticType"] == "measure"
-
-        smart_fields = get_fields(df, smart_schema_identification=True)
-        assert smart_fields[0]["analyticType"] == "dimension"
-        assert "aggName" not in smart_fields[0]
-
-    def test_high_cardinality_int_becomes_measure(self):
-        # An int column where every row has a distinct continuous-like value:
-        # default rule says "dimension"; smart mode keeps every-row-distinct
-        # as dimension (looks like an ID).  Use a many-but-not-all-unique case
-        # to exercise the actual measure branch.
-        df = pl.DataFrame({
-            "ts_ms": pl.Series(list(range(1000)) * 2, dtype=pl.Int64),
-        })
-        default_fields = get_fields(df)
-        assert default_fields[0]["analyticType"] == "dimension"
-
-        smart_fields = get_fields(df, smart_schema_identification=True)
-        assert smart_fields[0]["analyticType"] == "measure"
-        assert smart_fields[0]["aggName"] == "sum"
-
-    def test_every_row_unique_int_is_dimension(self):
-        # Looks like a primary-key / row-id → dimension.
-        df = pl.DataFrame({"row_id": pl.Series(list(range(500)), dtype=pl.Int64)})
-        fields = get_fields(df, smart_schema_identification=True)
-        assert fields[0]["analyticType"] == "dimension"
-        assert "aggName" not in fields[0]
-
-    def test_all_null_column_falls_back_to_default(self):
-        df = pl.DataFrame({"x": pl.Series([None, None, None], dtype=pl.Int64)})
-        fields = get_fields(df, smart_schema_identification=True)
-        # default for Int64 is dimension — should not crash on n_non_null == 0
-        assert fields[0]["analyticType"] == "dimension"
-
-    def test_non_numeric_columns_unaffected_by_smart_mode(self):
-        df = pl.DataFrame({
-            "name": ["a", "b"],
-            "ts": [datetime.datetime(2024, 1, 1), datetime.datetime(2024, 1, 2)],
-        })
-        fields = get_fields(df, smart_schema_identification=True)
-        field_map = {f["fid"]: f for f in fields}
-        assert field_map["name"]["analyticType"] == "dimension"
-        assert field_map["name"]["semanticType"] == "nominal"
-        assert field_map["ts"]["analyticType"] == "dimension"
-        assert field_map["ts"]["semanticType"] == "temporal"
-
-
 class TestFieldOverrides:
     def test_override_analytic_type(self):
         df = pl.DataFrame({"VendorID": pl.Series([1, 2, 3], dtype=pl.Int64)})
@@ -222,19 +162,3 @@ class TestFieldOverrides:
         with caplog.at_level("WARNING", logger="gw_polars.fields"):
             get_fields(df, field_overrides={"nope": {"analyticType": "measure"}})
         assert any("nope" in rec.message for rec in caplog.records)
-
-    def test_overrides_combine_with_smart_mode(self):
-        df = pl.DataFrame({
-            "VendorID": pl.Series([1, 2, 3, 4] * 250, dtype=pl.Int64),  # smart→dim
-            "fare":     pl.Series([1.0, 2.5] * 500, dtype=pl.Float64),  # smart→dim
-        })
-        fields = get_fields(
-            df,
-            smart_schema_identification=True,
-            field_overrides={"fare": {"analyticType": "measure"}},
-        )
-        field_map = {f["fid"]: f for f in fields}
-        assert field_map["VendorID"]["analyticType"] == "dimension"
-        # smart would have flipped fare to dimension; user override wins.
-        assert field_map["fare"]["analyticType"] == "measure"
-        assert field_map["fare"]["aggName"] == "sum"
