@@ -111,6 +111,7 @@ def execute_workflow(
                 max_rows,
             )
         _log(logging.INFO, "execute_workflow: returned %d row(s)", len(result))
+        _log(logging.DEBUG, f"execute_workflow: returned {str(result[:min(len(result), 20)])}")
 
         return result
     finally:
