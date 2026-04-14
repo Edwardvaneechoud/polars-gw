@@ -196,6 +196,8 @@ def walk(
     open_browser: bool = True,
     max_rows: int | None = DEFAULT_MAX_ROWS,
     log_level: str = "info",
+    smart_schema_identification: bool = False,
+    field_overrides: dict[str, dict[str, Any]] | None = None,
 ) -> WalkHandle:
     """Launch a local Graphic Walker UI connected to ``df``.
 
@@ -219,6 +221,14 @@ def walk(
             and for uvicorn's request logs.  Defaults to ``"info"`` so
             you see compute timings + cap warnings in the REPL.  Set
             to ``"warning"`` for less noise, ``"debug"`` for more.
+        smart_schema_identification: Forwarded to :func:`get_fields` —
+            when ``True``, refines numeric dimension/measure classification
+            using the actual data's cardinality. Default ``False`` (matches
+            PyGWalker's pure-dtype behaviour).
+        field_overrides: Forwarded to :func:`get_fields` — shallow-merge
+            override for any per-field key (``analyticType``,
+            ``semanticType``, ``aggName``, …). Useful when neither dtype
+            nor smart inference gets a column right.
 
     Returns:
         A :class:`WalkHandle` with ``.url`` and ``.stop()``.
@@ -232,7 +242,11 @@ def walk(
     if isinstance(df, pl.LazyFrame):
         df = df.collect()
 
-    fields = get_fields(df)
+    fields = get_fields(
+        df,
+        smart_schema_identification=smart_schema_identification,
+        field_overrides=field_overrides,
+    )
 
     app = FastAPI()
     app.add_middleware(
