@@ -266,6 +266,57 @@ class TestAggregate:
         # Only the group-by column should be returned
         assert set(result[0].keys()) == {"city"}
 
+    def test_count_star_group_by(self):
+        """GW sends count(*) as field='*', agg='count' — count all rows per group."""
+        payload = {
+            "workflow": [
+                {"type": "view", "query": [
+                    {
+                        "op": "aggregate",
+                        "groupBy": ["city"],
+                        "measures": [{"field": "*", "agg": "count", "asFieldKey": "n"}],
+                    }
+                ]}
+            ]
+        }
+        result = execute_workflow(_sample_df(), payload)
+        result_map = {r["city"]: r["n"] for r in result}
+        assert result_map == {"Amsterdam": 2, "Berlin": 2, "Paris": 1}
+
+    def test_count_star_no_group(self):
+        """count(*) with no group_by returns total row count."""
+        payload = {
+            "workflow": [
+                {"type": "view", "query": [
+                    {
+                        "op": "aggregate",
+                        "groupBy": [],
+                        "measures": [{"field": "*", "agg": "count", "asFieldKey": "total"}],
+                    }
+                ]}
+            ]
+        }
+        result = execute_workflow(_sample_df(), payload)
+        assert result == [{"total": 5}]
+
+    def test_count_star_counts_nulls(self):
+        """Unlike count(col) which skips nulls, count(*) counts every row."""
+        df = pl.DataFrame({"group": ["a", "a", "b"], "value": [1, None, None]})
+        payload = {
+            "workflow": [
+                {"type": "view", "query": [
+                    {
+                        "op": "aggregate",
+                        "groupBy": ["group"],
+                        "measures": [{"field": "*", "agg": "count", "asFieldKey": "n"}],
+                    }
+                ]}
+            ]
+        }
+        result = execute_workflow(df, payload)
+        result_map = {r["group"]: r["n"] for r in result}
+        assert result_map == {"a": 2, "b": 1}
+
     def test_empty_measures_multi_column_distinct(self):
         """measures=[] with multiple groupBy cols → distinct combinations."""
         payload = {
