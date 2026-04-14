@@ -2,12 +2,23 @@
 
 from __future__ import annotations
 
+import contextvars
 import logging
+import uuid
 from typing import Any
 
 import polars as pl
 
 logger = logging.getLogger(__name__)
+
+# Per-request ID so concurrent execute_workflow calls can be disentangled in the logs.
+_request_id: contextvars.ContextVar[str] = contextvars.ContextVar("gw_polars_request_id", default="")
+
+
+def _log(level: int, msg: str, *args: Any) -> None:
+    rid = _request_id.get()
+    logger.log(level, (f"[{rid}] " if rid else "") + msg, *args)
+
 
 DEFAULT_MAX_ROWS: int = 1_000_000
 
@@ -36,61 +47,74 @@ def execute_workflow(
     Returns:
         A list of row dicts (IRow[]) suitable for returning to Graphic Walker.
     """
-    lf = df.lazy() if isinstance(df, pl.DataFrame) else df
+    rid_token = _request_id.set(uuid.uuid4().hex[:8])
+    try:
+        lf = df.lazy() if isinstance(df, pl.DataFrame) else df
 
-    workflow = payload.get("workflow", [])
-    logger.info("execute_workflow: %d step(s), max_rows=%s", len(workflow), max_rows)
+        workflow = payload.get("workflow", [])
+        _log(logging.INFO, "execute_workflow: %d step(s), max_rows=%s", len(workflow), max_rows)
+        _log(logging.DEBUG, "payload=%r", payload)
 
-    for i, step in enumerate(workflow):
-        step_type = step.get("type")
-        if step_type == "filter":
-            filters = step.get("filters", [])
-            logger.info(
-                "  step %d: filter — %s",
-                i,
-                ", ".join(f"{f.get('fid')} {f.get('rule', {}).get('type')}" for f in filters) or "(none)",
+        for i, step in enumerate(workflow):
+            step_type = step.get("type")
+            if step_type == "filter":
+                filters = step.get("filters", [])
+                _log(
+                    logging.INFO,
+                    "  step %d: filter — %s",
+                    i,
+                    ", ".join(f"{f.get('fid')} {f.get('rule', {}).get('type')}" for f in filters) or "(none)",
+                )
+                lf = _apply_filters(lf, filters)
+            elif step_type == "view":
+                queries = step.get("query", [])
+                _log(
+                    logging.INFO,
+                    "  step %d: view — %s",
+                    i,
+                    ", ".join(_describe_view_query(q) for q in queries) or "(none)",
+                )
+                lf = _apply_view_queries(lf, queries)
+            elif step_type == "sort":
+                by = step.get("by", [])
+                direction = step.get("sort", "ascending")
+                _log(logging.INFO, "  step %d: sort — by=%s %s", i, by, direction)
+                lf = _apply_sort(lf, by, direction)
+            elif step_type == "transform":
+                transforms = step.get("transform", [])
+                _log(
+                    logging.INFO,
+                    "  step %d: transform — %s",
+                    i,
+                    ", ".join(f"{t.get('expression', {}).get('op')}->{t.get('key')}" for t in transforms) or "(none)",
+                )
+                lf = _apply_transforms(lf, transforms)
+            else:
+                _log(logging.WARNING, "  step %d: unknown step type %r", i, step_type)
+
+        limit = payload.get("limit")
+        if limit is not None:
+            offset = payload.get("offset", 0) or 0
+            _log(logging.INFO, "  slice: offset=%d, limit=%d", offset, limit)
+            lf = lf.slice(offset, limit)
+
+        if max_rows is not None:
+            lf = lf.head(max_rows)
+
+        result = _sanitize_for_json(lf)
+
+        if max_rows is not None and len(result) == max_rows:
+            _log(
+                logging.WARNING,
+                "Result capped at max_rows=%d — output may be truncated. "
+                "Pass a larger max_rows or max_rows=None to disable.",
+                max_rows,
             )
-            lf = _apply_filters(lf, filters)
-        elif step_type == "view":
-            queries = step.get("query", [])
-            logger.info("  step %d: view — %s", i, ", ".join(_describe_view_query(q) for q in queries) or "(none)")
-            lf = _apply_view_queries(lf, queries)
-        elif step_type == "sort":
-            by = step.get("by", [])
-            direction = step.get("sort", "ascending")
-            logger.info("  step %d: sort — by=%s %s", i, by, direction)
-            lf = _apply_sort(lf, by, direction)
-        elif step_type == "transform":
-            transforms = step.get("transform", [])
-            logger.info(
-                "  step %d: transform — %s",
-                i,
-                ", ".join(f"{t.get('expression', {}).get('op')}->{t.get('key')}" for t in transforms) or "(none)",
-            )
-            lf = _apply_transforms(lf, transforms)
-        else:
-            logger.warning("  step %d: unknown step type %r", i, step_type)
+        _log(logging.INFO, "execute_workflow: returned %d row(s)", len(result))
 
-    limit = payload.get("limit")
-    if limit is not None:
-        offset = payload.get("offset", 0) or 0
-        logger.info("  slice: offset=%d, limit=%d", offset, limit)
-        lf = lf.slice(offset, limit)
-
-    if max_rows is not None:
-        lf = lf.head(max_rows)
-
-    result = _sanitize_for_json(lf)
-
-    if max_rows is not None and len(result) == max_rows:
-        logger.warning(
-            "Result capped at max_rows=%d — output may be truncated. "
-            "Pass a larger max_rows or max_rows=None to disable.",
-            max_rows,
-        )
-    logger.info("execute_workflow: returned %d row(s)", len(result))
-
-    return result
+        return result
+    finally:
+        _request_id.reset(rid_token)
 
 
 def _describe_view_query(query: dict) -> str:
@@ -215,14 +239,25 @@ def _apply_aggregate(lf: pl.LazyFrame, query: dict) -> pl.LazyFrame:
     for m in measures:
         field = m.get("field")
         agg = m.get("agg")
-        alias = m.get("asFieldKey", field)
+        alias = m.get("asFieldKey") or field or agg or "value"
+
+        # SQL-style count(*): Graphic Walker sends field="*" (or empty) for
+        # "count all rows".  Polars' pl.len() is the direct equivalent.
+        if agg == "count" and (not field or field == "*"):
+            agg_exprs.append(pl.len().alias(alias))
+            continue
+
         if not field or field not in schema:
+            _log(logging.WARNING, "  skipping measure: field=%r agg=%r (field not in schema)", field, agg)
             continue
         expr = _build_agg_expr(field, agg)
-        if expr is not None:
-            agg_exprs.append(expr.alias(alias))
+        if expr is None:
+            _log(logging.WARNING, "  skipping measure: field=%r agg=%r (unsupported aggregator)", field, agg)
+            continue
+        agg_exprs.append(expr.alias(alias))
 
     if not agg_exprs:
+        _log(logging.WARNING, "  aggregate: no valid measures, returning input unchanged")
         return lf
 
     if group_by:
