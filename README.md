@@ -28,8 +28,8 @@ handle.stop()
 ```
 
 `walk()` starts a FastAPI server in a background daemon thread, serves
-the Graphic Walker UI (loaded from jsdelivr), and wires its computation
-callback to `execute_workflow`.
+the Graphic Walker UI **bundled inside the wheel** (no CDN, no network
+required), and wires its computation callback to `execute_workflow`.
 
 ## Usage
 
@@ -101,6 +101,94 @@ DataFrame → Polars expressions → execute → dicts
 ```
 
 No DuckDB dependency. No SQL intermediate. Just Polars.
+
+## gw-polars vs PyGWalker — which should you use?
+
+Different tools, different jobs.  `gw-polars` is a focused compute engine
++ a standalone browser UI.  PyGWalker is a broader product with richer
+UX surface area.
+
+### Use `gw-polars` when
+
+- You're already in the **Polars ecosystem** (e.g. LazyFrames, streaming,
+  or tools like [Flowfile](https://github.com/edwardvaneechoud/Flowfile))
+  and don't want a DuckDB round-trip in the middle.
+- You need **type fidelity** for `Categorical`, `Decimal`, `Duration`,
+  `List`, `Struct` — they pass through as-is instead of degrading through
+  SQL.
+- You want a **lean install** (~40 MB core, no DuckDB).
+- You're building your **own frontend** and just need the translator
+  (`execute_workflow` + `get_fields`).
+- You want **debuggable** query plans (Polars expressions, not generated
+  SQL).
+- You need a **standalone browser UI** (`walk(df)`) without notebook
+  dependencies.
+
+### Use PyGWalker when
+
+- You want the **Jupyter inline widget** — PyGWalker renders the UI
+  *inside* a notebook cell via anywidget.  `gw_polars.walk()` pops a
+  browser tab.
+- You need first-party **framework integrations** (Streamlit, Gradio,
+  Dash).  PyGWalker has these; gw-polars does not.
+- You rely on **chart persistence** — saving/loading chart specs,
+  exporting HTML/PNG, `vis_spec` round-tripping.
+- You want **heterogeneous input support** (pandas + Polars + parquet +
+  SQL tables under one DuckDB layer).
+- Your data is **too large to collect into memory** and you need DuckDB's
+  battle-tested out-of-core execution.
+- You're using **Kanaries cloud features** (sharing, cloud chat, etc.).
+
+### At a glance
+
+| Concern | gw-polars | PyGWalker |
+|---|---|---|
+| Backend | Polars expressions | DuckDB SQL |
+| Install weight | Lean (polars only) | DuckDB + heavier deps |
+| Jupyter inline widget | ❌ (browser tab) | ✅ |
+| Streamlit / Gradio / Dash | ❌ | ✅ |
+| Standalone browser UI | ✅ (`walk()`) | ✅ |
+| Chart save/load/export | ❌ (defers to GW client) | ✅ |
+| LazyFrame native | ✅ | via DuckDB |
+| Polars Categorical/Decimal/Duration fidelity | ✅ | lossy through SQL |
+| New GW payload ops | Requires translator update | Often works via SQL |
+| Heterogeneous inputs (pandas/parquet/SQL) | Polars-only | ✅ |
+
+Short version: if you're all-in on Polars and want the fast, native path,
+use `gw-polars`.  If you want inline-notebook, Streamlit, or chart
+persistence out of the box, use PyGWalker.
+
+## Development
+
+### Python
+
+```bash
+uv sync --extra viz           # runtime + viz + dev deps
+uv run pytest                 # 60+ tests
+uv run ruff check .
+```
+
+### Bundling the viz assets
+
+The `walk()` UI ships a pre-built JS/CSS bundle under
+`gw_polars/viz_assets/` (committed to the repo) so end users don't need
+Node to `pip install gw-polars[viz]`.
+
+Maintainers rebuild when bumping Graphic Walker:
+
+```bash
+cd js
+npm install
+npm run build                 # writes into ../gw_polars/viz_assets/
+```
+
+Bundle layout:
+
+- `graphic-walker.js` — Graphic Walker + React 19, minified IIFE (~4 MB)
+- `graphic-walker.css` — Tailwind-compiled stylesheet (~60 KB)
+- `versions.json` — pinned npm versions + build timestamp
+
+See `js/README.md` for details.
 
 ## License
 

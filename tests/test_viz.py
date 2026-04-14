@@ -58,6 +58,23 @@ class TestWalk:
         finally:
             handle.stop()
 
+    def test_walk_serves_bundled_assets(self, sample_df: pl.DataFrame) -> None:
+        """The bundled JS/CSS are served out of /static/ (no CDN)."""
+        handle = walk(sample_df, open_browser=False)
+        try:
+            _wait_until_up(handle.url)
+            with urllib.request.urlopen(f"{handle.url}/static/graphic-walker.js") as r:  # noqa: S310
+                assert r.status == 200
+                body = r.read()
+                # Should be the minified bundle — expect the entry helper name.
+                assert b"__gwpRender" in body
+                assert len(body) > 100_000  # bundle is several MB
+            with urllib.request.urlopen(f"{handle.url}/static/graphic-walker.css") as r:  # noqa: S310
+                assert r.status == 200
+                assert len(r.read()) > 1_000
+        finally:
+            handle.stop()
+
     def test_api_fields(self, sample_df: pl.DataFrame) -> None:
         import json
 
