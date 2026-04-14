@@ -127,3 +127,32 @@ def test_walk_without_viz_extras_raises(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(viz, "_VIZ_IMPORT_ERROR", ImportError("No module named 'fastapi'"))
     with pytest.raises(ImportError, match=r"gw-polars\[viz\]"):
         viz.walk(pl.DataFrame({"a": [1]}))
+
+
+class TestLogging:
+    """walk() should surface compute logs + cap warnings to the console."""
+
+    def test_compute_log_emitted(self, caplog: pytest.LogCaptureFixture) -> None:
+        df = pl.DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]})
+        handle = walk(df, open_browser=False)
+        try:
+            _wait_until_up(handle.url)
+            with caplog.at_level("INFO", logger="gw_polars"):
+                _post(f"{handle.url}/api/compute", b'{"workflow":[]}')
+            messages = [r.getMessage() for r in caplog.records]
+            assert any("compute:" in m and "row(s)" in m and "ms" in m for m in messages), messages
+        finally:
+            handle.stop()
+
+    def test_max_rows_cap_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        """When max_rows truncates a result, log marks it [CAPPED]."""
+        df = pl.DataFrame({"a": list(range(100))})
+        handle = walk(df, open_browser=False, max_rows=10)
+        try:
+            _wait_until_up(handle.url)
+            with caplog.at_level("INFO", logger="gw_polars"):
+                _post(f"{handle.url}/api/compute", b'{"workflow":[]}')
+            messages = [r.getMessage() for r in caplog.records]
+            assert any("[CAPPED]" in m for m in messages), messages
+        finally:
+            handle.stop()
