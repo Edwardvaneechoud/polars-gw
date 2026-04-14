@@ -3,6 +3,10 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# Node / viz bundle build
+js/node_modules/
+.esbuild-cache/
+
 # C extensions
 *.so
 

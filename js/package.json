@@ -1,0 +1,23 @@
+{
+  "name": "gw-polars-viz-build",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Build script that bundles Graphic Walker + React into gw_polars/viz_assets/ so the Python viz extra ships a self-contained browser UI.",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "clean": "rimraf ../gw_polars/viz_assets"
+  },
+  "dependencies": {
+    "@kanaries/graphic-walker": "0.5.0",
+    "react": "19.0.0",
+    "react-dom": "19.0.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/forms": "^0.5.7",
+    "autoprefixer": "^10.4.20",
+    "esbuild": "^0.24.0",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.17"
+  }
+}

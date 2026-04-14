@@ -28,8 +28,8 @@ handle.stop()
 ```
 
 `walk()` starts a FastAPI server in a background daemon thread, serves
-the Graphic Walker UI (loaded from jsdelivr), and wires its computation
-callback to `execute_workflow`.
+the Graphic Walker UI **bundled inside the wheel** (no CDN, no network
+required), and wires its computation callback to `execute_workflow`.
 
 ## Usage
 
@@ -157,6 +157,38 @@ UX surface area.
 Short version: if you're all-in on Polars and want the fast, native path,
 use `gw-polars`.  If you want inline-notebook, Streamlit, or chart
 persistence out of the box, use PyGWalker.
+
+## Development
+
+### Python
+
+```bash
+uv sync --extra viz           # runtime + viz + dev deps
+uv run pytest                 # 60+ tests
+uv run ruff check .
+```
+
+### Bundling the viz assets
+
+The `walk()` UI ships a pre-built JS/CSS bundle under
+`gw_polars/viz_assets/` (committed to the repo) so end users don't need
+Node to `pip install gw-polars[viz]`.
+
+Maintainers rebuild when bumping Graphic Walker:
+
+```bash
+cd js
+npm install
+npm run build                 # writes into ../gw_polars/viz_assets/
+```
+
+Bundle layout:
+
+- `graphic-walker.js` — Graphic Walker + React 19, minified IIFE (~4 MB)
+- `graphic-walker.css` — Tailwind-compiled stylesheet (~60 KB)
+- `versions.json` — pinned npm versions + build timestamp
+
+See `js/README.md` for details.
 
 ## License
 
