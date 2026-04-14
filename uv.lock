@@ -90,6 +90,13 @@ dependencies = [
     { name = "polars" },
 ]
 
+[package.optional-dependencies]
+viz = [
+    { name = "fastapi" },
+    { name = "pydantic" },
+    { name = "uvicorn" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "pytest" },
@@ -102,7 +109,13 @@ example = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "polars", specifier = ">=1.0.0" }]
+requires-dist = [
+    { name = "fastapi", marker = "extra == 'viz'", specifier = ">=0.110.0" },
+    { name = "polars", specifier = ">=1.0.0" },
+    { name = "pydantic", marker = "extra == 'viz'", specifier = ">=2.0.0" },
+    { name = "uvicorn", marker = "extra == 'viz'", specifier = ">=0.29.0" },
+]
+provides-extras = ["viz"]
 
 [package.metadata.requires-dev]
 dev = [

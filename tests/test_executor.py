@@ -111,6 +111,30 @@ class TestFilterRegexp:
         result = execute_workflow(_sample_df(), payload)
         assert all(r["city"].startswith("A") for r in result)
 
+    def test_regexp_default_case_sensitive(self):
+        """Without caseSensitive flag, match is case-sensitive."""
+        payload = {
+            "workflow": [
+                {"type": "filter", "filters": [
+                    {"fid": "city", "rule": {"type": "regexp", "value": "^a"}}
+                ]}
+            ]
+        }
+        result = execute_workflow(_sample_df(), payload)
+        assert len(result) == 0  # No city starts with lowercase 'a'
+
+    def test_regexp_case_insensitive(self):
+        payload = {
+            "workflow": [
+                {"type": "filter", "filters": [
+                    {"fid": "city", "rule": {"type": "regexp", "value": "^a", "caseSensitive": False}}
+                ]}
+            ]
+        }
+        result = execute_workflow(_sample_df(), payload)
+        assert len(result) == 2  # Amsterdam x 2
+        assert all(r["city"] == "Amsterdam" for r in result)
+
 
 class TestFilterTemporalRange:
     def test_temporal_range(self):
@@ -317,6 +341,31 @@ class TestAggregate:
         result_map = {r["group"]: r["n"] for r in result}
         assert result_map == {"a": 2, "b": 1}
 
+    def test_agg_expr(self):
+        """agg='expr' evaluates a SQL aggregation expression."""
+        payload = {
+            "workflow": [
+                {"type": "view", "query": [
+                    {
+                        "op": "aggregate",
+                        "groupBy": ["city"],
+                        "measures": [
+                            {
+                                "field": "",
+                                "agg": "expr",
+                                "expression": "SUM(sales) / SUM(quantity)",
+                                "asFieldKey": "avg_price",
+                            }
+                        ],
+                    }
+                ]}
+            ]
+        }
+        result = execute_workflow(_sample_df(), payload)
+        result_map = {r["city"]: r["avg_price"] for r in result}
+        # Amsterdam: (100+150)/(10+15) = 10; Berlin: (200+250)/(20+25) = 10; Paris: 300/30 = 10
+        assert result_map == {"Amsterdam": 10.0, "Berlin": 10.0, "Paris": 10.0}
+
     def test_empty_measures_multi_column_distinct(self):
         """measures=[] with multiple groupBy cols → distinct combinations."""
         payload = {
@@ -516,6 +565,80 @@ class TestTransform:
         result = execute_workflow(df, payload)
         months = [r["month"] for r in result]
         assert months == [1, 3, 6, 9, 12]
+
+    def test_datetime_drill_dict_params(self):
+        """GW sometimes wraps transform params as dicts: {"field": ...}, {"value": ...}."""
+        df = _temporal_df()
+        payload = {
+            "workflow": [
+                {"type": "transform", "transform": [
+                    {
+                        "key": "quarter",
+                        "expression": {
+                            "op": "dateTimeDrill",
+                            "params": [{"field": "date"}, {"value": "quarter"}],
+                            "as": "quarter",
+                        },
+                    }
+                ]}
+            ]
+        }
+        result = execute_workflow(df, payload)
+        quarters = [r["quarter"] for r in result]
+        assert quarters == [1, 1, 2, 3, 4]
+
+    def test_datetime_feature(self):
+        """dateTimeFeature is the canonical GW op for extracting a temporal component."""
+        df = _temporal_df()
+        payload = {
+            "workflow": [
+                {"type": "transform", "transform": [
+                    {
+                        "key": "month",
+                        "expression": {
+                            "op": "dateTimeFeature",
+                            "params": [{"field": "date"}, {"value": "month"}],
+                            "as": "month",
+                        },
+                    }
+                ]}
+            ]
+        }
+        result = execute_workflow(df, payload)
+        assert [r["month"] for r in result] == [1, 3, 6, 9, 12]
+
+    def test_expr_transform(self):
+        """op='expr' evaluates an arbitrary SQL-ish expression via pl.sql_expr."""
+        df = pl.DataFrame({"a": [1, 2, 3], "b": [10, 20, 30]})
+        payload = {
+            "workflow": [
+                {"type": "transform", "transform": [
+                    {
+                        "key": "total",
+                        "expression": {
+                            "op": "expr",
+                            "params": [{"type": "sql", "value": "a + b"}],
+                            "as": "total",
+                        },
+                    }
+                ]}
+            ]
+        }
+        result = execute_workflow(df, payload)
+        assert [r["total"] for r in result] == [11, 22, 33]
+
+    def test_paint_transform_is_skipped(self):
+        """paint transform is not supported — logs a warning and leaves df unchanged."""
+        payload = {
+            "workflow": [
+                {"type": "transform", "transform": [
+                    {"key": "color", "expression": {"op": "paint", "params": [], "as": "color"}}
+                ]}
+            ]
+        }
+        result = execute_workflow(_sample_df(), payload)
+        assert len(result) == 5  # Unchanged
+        assert "color" not in result[0]
 
     def test_one_transform_adds_constant_column(self):
         """GW's 'Row Count' helper: op='one' creates a constant 1 column."""

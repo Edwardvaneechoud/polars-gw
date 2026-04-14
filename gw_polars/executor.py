@@ -176,12 +176,20 @@ def _build_filter_expr(fid: str, rule: dict, schema: pl.Schema) -> pl.Expr | Non
 
     elif rule_type == "temporal range":
         low, high = value[0], value[1]
+        # Optional timezone/offset in minutes — shift the user-supplied bounds
+        # so they align with the column's UTC epoch-ms representation.
+        offset_min = rule.get("offset") or 0
+        offset_ms = offset_min * 60_000
         dtype = schema[fid]
         col = pl.col(fid)
         if dtype == pl.Date:
             col = col.cast(pl.Datetime).dt.timestamp("ms")
         elif dtype.base_type() == pl.Datetime:
             col = col.dt.timestamp("ms")
+        if low is not None:
+            low = low - offset_ms
+        if high is not None:
+            high = high - offset_ms
         if low is not None and high is not None:
             return col.is_between(low, high)
         if low is not None:
@@ -200,6 +208,9 @@ def _build_filter_expr(fid: str, rule: dict, schema: pl.Schema) -> pl.Expr | Non
     elif rule_type == "regexp":
         pattern = rule.get("value", "")
         if pattern:
+            # Graphic Walker's caseSensitive flag — default True when absent.
+            if rule.get("caseSensitive") is False and not pattern.startswith("(?i)"):
+                pattern = f"(?i){pattern}"
             return pl.col(fid).cast(pl.Utf8).str.contains(pattern)
 
     return None
@@ -245,6 +256,17 @@ def _apply_aggregate(lf: pl.LazyFrame, query: dict) -> pl.LazyFrame:
         # "count all rows".  Polars' pl.len() is the direct equivalent.
         if agg == "count" and (not field or field == "*"):
             agg_exprs.append(pl.len().alias(alias))
+            continue
+
+        # agg="expr": arbitrary SQL expression, e.g. "SUM(a) / SUM(b)".  The
+        # expression is taken from the measure's "expression" or "expr" field.
+        if agg == "expr":
+            sql = m.get("expression") or m.get("expr") or field
+            parsed = _parse_sql_expr(sql)
+            if parsed is None:
+                _log(logging.WARNING, "  skipping measure: agg='expr' expression=%r (could not parse)", sql)
+                continue
+            agg_exprs.append(parsed.alias(alias))
             continue
 
         if not field or field not in schema:
@@ -352,6 +374,55 @@ def _apply_transforms(lf: pl.LazyFrame, transforms: list[dict]) -> pl.LazyFrame:
     return lf
 
 
+def _param_to_str(param: Any) -> str | None:
+    """Extract a string from a transform parameter.
+
+    Graphic Walker sometimes sends params as plain strings ("date_col",
+    "month") and sometimes as dicts ({"field": "date_col"}, {"value":
+    "month"}).  This helper normalises both shapes.
+    """
+    if isinstance(param, str):
+        return param
+    if isinstance(param, dict):
+        for key in ("field", "fid", "value", "name"):
+            v = param.get(key)
+            if isinstance(v, str):
+                return v
+    return None
+
+
+def _parse_sql_expr(sql: Any) -> pl.Expr | None:
+    """Translate a SQL-ish expression string to a Polars expression.
+
+    Used for GW's ``expr`` aggregator and ``expr`` transform op, where the
+    payload carries an arbitrary expression the user typed in the UI.
+    """
+    if not isinstance(sql, str) or not sql.strip():
+        return None
+    try:
+        return pl.sql_expr(sql)
+    except Exception as e:  # noqa: BLE001 - we genuinely want to swallow parse errors
+        _log(logging.WARNING, "  pl.sql_expr failed for %r: %s", sql, e)
+        return None
+
+
+_DATETIME_FEATURE_MAP: dict[str, str] = {
+    # GW granularity/feature label → Polars .dt method name
+    "year": "year",
+    "quarter": "quarter",
+    "month": "month",
+    "week": "week",
+    "day": "day",
+    "dayOfMonth": "day",
+    "dayOfYear": "ordinal_day",
+    "dayOfWeek": "weekday",
+    "weekday": "weekday",
+    "hour": "hour",
+    "minute": "minute",
+    "second": "second",
+}
+
+
 def _build_transform_expr(expression: dict, schema: pl.Schema) -> pl.Expr | None:
     op = expression.get("op")
     params = expression.get("params", [])
@@ -361,8 +432,28 @@ def _build_transform_expr(expression: dict, schema: pl.Schema) -> pl.Expr | None
     if op == "one":
         return pl.lit(1, dtype=pl.Int64)
 
+    # op="expr": arbitrary expression supplied as a SQL string.  Look for it
+    # in the standard params shape first, otherwise in a top-level field.
+    if op == "expr":
+        sql = None
+        for p in params:
+            if isinstance(p, dict) and p.get("type") in ("sql", "expression", "value"):
+                sql = p.get("value")
+                if isinstance(sql, str):
+                    break
+        if sql is None:
+            sql = expression.get("sql") or expression.get("expression")
+        return _parse_sql_expr(sql)
+
+    # op="paint": value/colour mapping used by GW's paint tool.  Mapping
+    # structure is complex and undocumented; log and return input unchanged
+    # (null expression) so the workflow doesn't crash.
+    if op == "paint":
+        _log(logging.WARNING, "  paint transform is not supported — skipping")
+        return None
+
     if op == "bin":
-        field = params[0] if params else None
+        field = _param_to_str(params[0]) if params else None
         num_bins = expression.get("num", 10)
         if field and field in schema:
             col = pl.col(field)
@@ -374,33 +465,22 @@ def _build_transform_expr(expression: dict, schema: pl.Schema) -> pl.Expr | None
             )
 
     elif op in ("log", "log2", "log10"):
-        field = params[0] if params else None
+        field = _param_to_str(params[0]) if params else None
         base_map = {"log": 2.718281828459045, "log2": 2, "log10": 10}
         if field and field in schema:
             return pl.col(field).log(base=base_map[op])
 
     elif op == "binCount":
-        field = params[0] if params else None
+        field = _param_to_str(params[0]) if params else None
         if field and field in schema:
             return pl.col(field)
 
-    elif op == "dateTimeDrill":
-        field = params[0] if params else None
-        time_unit = params[1] if len(params) > 1 else "year"
+    elif op in ("dateTimeDrill", "dateTimeFeature"):
+        field = _param_to_str(params[0]) if params else None
+        time_unit = _param_to_str(params[1]) if len(params) > 1 else "year"
         if field and field in schema:
-            col = pl.col(field)
-            drill_map = {
-                "year": col.dt.year(),
-                "quarter": col.dt.quarter(),
-                "month": col.dt.month(),
-                "week": col.dt.week(),
-                "day": col.dt.day(),
-                "dayOfWeek": col.dt.weekday(),
-                "hour": col.dt.hour(),
-                "minute": col.dt.minute(),
-                "second": col.dt.second(),
-            }
-            return drill_map.get(time_unit, col.dt.year())
+            method = _DATETIME_FEATURE_MAP.get(time_unit or "year", "year")
+            return getattr(pl.col(field).dt, method)()
 
     return None
 
