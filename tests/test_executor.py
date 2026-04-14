@@ -517,6 +517,27 @@ class TestTransform:
         months = [r["month"] for r in result]
         assert months == [1, 3, 6, 9, 12]
 
+    def test_datetime_drill_dict_params(self):
+        """GW sometimes wraps transform params as dicts: {"field": ...}, {"value": ...}."""
+        df = _temporal_df()
+        payload = {
+            "workflow": [
+                {"type": "transform", "transform": [
+                    {
+                        "key": "quarter",
+                        "expression": {
+                            "op": "dateTimeDrill",
+                            "params": [{"field": "date"}, {"value": "quarter"}],
+                            "as": "quarter",
+                        },
+                    }
+                ]}
+            ]
+        }
+        result = execute_workflow(df, payload)
+        quarters = [r["quarter"] for r in result]
+        assert quarters == [1, 1, 2, 3, 4]
+
     def test_one_transform_adds_constant_column(self):
         """GW's 'Row Count' helper: op='one' creates a constant 1 column."""
         payload = {

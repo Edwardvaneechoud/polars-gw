@@ -352,6 +352,23 @@ def _apply_transforms(lf: pl.LazyFrame, transforms: list[dict]) -> pl.LazyFrame:
     return lf
 
 
+def _param_to_str(param: Any) -> str | None:
+    """Extract a string from a transform parameter.
+
+    Graphic Walker sometimes sends params as plain strings ("date_col",
+    "month") and sometimes as dicts ({"field": "date_col"}, {"value":
+    "month"}).  This helper normalises both shapes.
+    """
+    if isinstance(param, str):
+        return param
+    if isinstance(param, dict):
+        for key in ("field", "fid", "value", "name"):
+            v = param.get(key)
+            if isinstance(v, str):
+                return v
+    return None
+
+
 def _build_transform_expr(expression: dict, schema: pl.Schema) -> pl.Expr | None:
     op = expression.get("op")
     params = expression.get("params", [])
@@ -362,7 +379,7 @@ def _build_transform_expr(expression: dict, schema: pl.Schema) -> pl.Expr | None
         return pl.lit(1, dtype=pl.Int64)
 
     if op == "bin":
-        field = params[0] if params else None
+        field = _param_to_str(params[0]) if params else None
         num_bins = expression.get("num", 10)
         if field and field in schema:
             col = pl.col(field)
@@ -374,19 +391,19 @@ def _build_transform_expr(expression: dict, schema: pl.Schema) -> pl.Expr | None
             )
 
     elif op in ("log", "log2", "log10"):
-        field = params[0] if params else None
+        field = _param_to_str(params[0]) if params else None
         base_map = {"log": 2.718281828459045, "log2": 2, "log10": 10}
         if field and field in schema:
             return pl.col(field).log(base=base_map[op])
 
     elif op == "binCount":
-        field = params[0] if params else None
+        field = _param_to_str(params[0]) if params else None
         if field and field in schema:
             return pl.col(field)
 
     elif op == "dateTimeDrill":
-        field = params[0] if params else None
-        time_unit = params[1] if len(params) > 1 else "year"
+        field = _param_to_str(params[0]) if params else None
+        time_unit = _param_to_str(params[1]) if len(params) > 1 else "year"
         if field and field in schema:
             col = pl.col(field)
             drill_map = {
@@ -400,7 +417,7 @@ def _build_transform_expr(expression: dict, schema: pl.Schema) -> pl.Expr | None
                 "minute": col.dt.minute(),
                 "second": col.dt.second(),
             }
-            return drill_map.get(time_unit, col.dt.year())
+            return drill_map.get(time_unit or "year", col.dt.year())
 
     return None
 
