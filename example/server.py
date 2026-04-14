@@ -57,11 +57,24 @@ def load_data() -> pl.DataFrame:
     import random
 
     random.seed(42)
+    cities = ["Amsterdam", "Berlin", "Paris", "London", "Madrid"] * 200
+    # Rough city centres (lat, lng) — add jitter so points spread around each city
+    city_coords = {
+        "Amsterdam": (52.3676, 4.9041),
+        "Berlin": (52.5200, 13.4050),
+        "Paris": (48.8566, 2.3522),
+        "London": (51.5074, -0.1278),
+        "Madrid": (40.4168, -3.7038),
+    }
+    latitudes = [round(city_coords[c][0] + random.uniform(-0.15, 0.15), 4) for c in cities]
+    longitudes = [round(city_coords[c][1] + random.uniform(-0.15, 0.15), 4) for c in cities]
     return pl.DataFrame({
-        "city": ["Amsterdam", "Berlin", "Paris", "London", "Madrid"] * 200,
+        "city": cities,
         "category": ["Electronics", "Clothing", "Food", "Books", "Sports"] * 200,
         "sales": [round(random.uniform(50, 500), 2) for _ in range(1000)],
         "quantity": [random.randint(1, 100) for _ in range(1000)],
+        "latitude": latitudes,
+        "longitude": longitudes,
         "date": pl.date_range(
             datetime.date(2023, 1, 1), datetime.date(2025, 9, 30), eager=True
         ).sample(1000, with_replacement=True, seed=42).sort(),
