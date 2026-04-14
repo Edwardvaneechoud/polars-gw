@@ -1,12 +1,15 @@
 // Bundles Graphic Walker + React + our entry point into a single IIFE
 // JS file and copies the matching CSS into gw_polars/viz_assets/.
 //
-// Run with `npm run build` (from the js/ directory) or
-// `python -m build_viz` via a helper.  The output files are committed
-// to the repo so `pip install` never needs Node.
+// Modes:
+//   node build.mjs            # one-shot production build (minified)
+//   node build.mjs --watch    # dev mode: watch + rebuild + source maps
+//
+// The production output files are committed to the repo so
+// `pip install` never needs Node.
 
-import { build } from "esbuild";
-import { execFileSync } from "node:child_process";
+import { context, build } from "esbuild";
+import { spawn } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,10 +17,11 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..");
 const outDir = resolve(repoRoot, "gw_polars", "viz_assets");
+const isWatch = process.argv.includes("--watch");
 
 await mkdir(outDir, { recursive: true });
 
-// ---------------------------------------------------------------- JS
+// -------------------------------------------------------- esbuild options
 // Force a single React / React-DOM instance for the whole bundle.  The
 // error #527 "Incompatible React versions" comes from two copies of
 // React ending up in the same bundle (one from our root node_modules,
@@ -27,11 +31,11 @@ await mkdir(outDir, { recursive: true });
 const reactRoot = resolve(__dirname, "node_modules", "react");
 const reactDomRoot = resolve(__dirname, "node_modules", "react-dom");
 
-await build({
+const esbuildOptions = {
   entryPoints: [resolve(__dirname, "entry.jsx")],
   bundle: true,
-  minify: true,
-  sourcemap: false,
+  minify: !isWatch,
+  sourcemap: isWatch ? "inline" : false,
   format: "iife",
   target: ["es2020"],
   platform: "browser",
@@ -45,7 +49,7 @@ await build({
     "react-dom/client": resolve(reactDomRoot, "client.js"),
   },
   define: {
-    "process.env.NODE_ENV": '"production"',
+    "process.env.NODE_ENV": isWatch ? '"development"' : '"production"',
     "process.env.DEBUG": "false",
     "process.platform": '"browser"',
     "process.browser": "true",
@@ -58,39 +62,81 @@ await build({
   },
   logLevel: "info",
   outfile: resolve(outDir, "graphic-walker.js"),
-});
-
-// --------------------------------------------------------------- CSS
-// GW 0.5.x ships source-only CSS.  We run Tailwind CLI against GW's
-// source tree + our entry.css to produce the final stylesheet.
-console.log("Building Tailwind CSS bundle…");
-const tailwindBin = resolve(__dirname, "node_modules", ".bin", "tailwindcss");
-execFileSync(
-  tailwindBin,
-  [
-    "-c", resolve(__dirname, "tailwind.config.cjs"),
-    "-i", resolve(__dirname, "entry.css"),
-    "-o", resolve(outDir, "graphic-walker.css"),
-    "--postcss", resolve(__dirname, "postcss.config.cjs"),
-    "--minify",
-  ],
-  { stdio: "inherit", cwd: __dirname },
-);
-
-// -------------------------------------------------------- version marker
-const pkg = JSON.parse(
-  await readFile(resolve(__dirname, "package.json"), "utf8"),
-);
-const versions = {
-  "@kanaries/graphic-walker": pkg.dependencies["@kanaries/graphic-walker"],
-  react: pkg.dependencies.react,
-  "react-dom": pkg.dependencies["react-dom"],
-  builtAt: new Date().toISOString(),
 };
-await writeFile(
-  resolve(outDir, "versions.json"),
-  JSON.stringify(versions, null, 2) + "\n",
-);
 
-console.log("gw-polars viz bundle written to:", outDir);
-console.log(versions);
+// --------------------------------------------------------------- versions
+async function writeVersions() {
+  const pkg = JSON.parse(
+    await readFile(resolve(__dirname, "package.json"), "utf8"),
+  );
+  const versions = {
+    "@kanaries/graphic-walker": pkg.dependencies["@kanaries/graphic-walker"],
+    react: pkg.dependencies.react,
+    "react-dom": pkg.dependencies["react-dom"],
+    mode: isWatch ? "dev" : "production",
+    builtAt: new Date().toISOString(),
+  };
+  await writeFile(
+    resolve(outDir, "versions.json"),
+    JSON.stringify(versions, null, 2) + "\n",
+  );
+  return versions;
+}
+
+// ---------------------------------------------------------- tailwind helpers
+const tailwindBin = resolve(__dirname, "node_modules", ".bin", "tailwindcss");
+const tailwindBaseArgs = [
+  "-c", resolve(__dirname, "tailwind.config.cjs"),
+  "-i", resolve(__dirname, "entry.css"),
+  "-o", resolve(outDir, "graphic-walker.css"),
+  "--postcss", resolve(__dirname, "postcss.config.cjs"),
+];
+
+function spawnTailwind(extraArgs) {
+  const args = [...tailwindBaseArgs, ...extraArgs];
+  const child = spawn(tailwindBin, args, { stdio: "inherit", cwd: __dirname });
+  return new Promise((resolveProm, rejectProm) => {
+    child.on("exit", (code) => (code === 0 ? resolveProm() : rejectProm(new Error(`tailwindcss exited with ${code}`))));
+    child.on("error", rejectProm);
+  });
+}
+
+// ================================================================ run
+if (isWatch) {
+  console.log("🔎  gw-polars viz bundle — WATCH MODE");
+  console.log("    JS + CSS rebuild on file changes; source maps enabled.");
+  console.log("    Reload the browser tab after a rebuild.\n");
+
+  // esbuild watcher
+  const ctx = await context(esbuildOptions);
+  await ctx.watch();
+
+  // tailwind watcher (spawned in parallel, long-running)
+  const tailwindChild = spawn(
+    tailwindBin,
+    [...tailwindBaseArgs, "--watch"],
+    { stdio: "inherit", cwd: __dirname },
+  );
+
+  await writeVersions();
+  console.log("gw-polars viz bundle (dev) watching →", outDir);
+
+  // Cleanly shut down on Ctrl+C
+  const shutdown = async () => {
+    tailwindChild.kill("SIGINT");
+    await ctx.dispose();
+    process.exit(0);
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+} else {
+  // one-shot production build
+  await build(esbuildOptions);
+
+  console.log("Building Tailwind CSS bundle…");
+  await spawnTailwind(["--minify"]);
+
+  const versions = await writeVersions();
+  console.log("gw-polars viz bundle written to:", outDir);
+  console.log(versions);
+}

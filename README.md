@@ -179,16 +179,24 @@ Maintainers rebuild when bumping Graphic Walker:
 ```bash
 cd js
 npm install
-npm run build                 # writes into ../gw_polars/viz_assets/
+npm run build                 # one-shot production build
+```
+
+Or iterate with watch mode (rebuilds JS + CSS on save, source maps on):
+
+```bash
+npm run dev                   # in one shell
+uv run python example/walk_demo.py   # in another — refresh browser to pick up changes
 ```
 
 Bundle layout:
 
-- `graphic-walker.js` — Graphic Walker + React 19, minified IIFE (~4 MB)
-- `graphic-walker.css` — Tailwind-compiled stylesheet (~60 KB)
-- `versions.json` — pinned npm versions + build timestamp
+- `graphic-walker.js` — Graphic Walker + React 19.2.0, minified IIFE (~4.4 MB)
+- `graphic-walker.css` — Tailwind-compiled stylesheet (~57 KB)
+- `versions.json` — pinned npm versions + build mode + timestamp
 
-See `js/README.md` for details.
+See `js/README.md` for details (including why React is pinned to
+exactly `19.2.0`).
 
 ## License
 
