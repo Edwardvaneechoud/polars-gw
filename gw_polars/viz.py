@@ -234,9 +234,6 @@ def walk(
     _require_viz()
     _ensure_console_logging(log_level)
 
-    if isinstance(df, pl.LazyFrame):
-        df = df.collect()
-
     fields = get_fields(df, field_overrides=field_overrides)
 
     app = FastAPI()
@@ -288,11 +285,17 @@ def walk(
         time.sleep(0.05)
 
     url = f"http://{host}:{bind_port}"
-    logger.info(
-        "Graphic Walker running on %s — %d rows x %d cols, max_rows=%s",
-        url, df.shape[0], df.shape[1], max_rows,
-    )
-
+    if isinstance(df, pl.DataFrame):
+        logger.info(
+            "Graphic Walker running on %s — %d rows x %d cols, max_rows=%s",
+            url, df.shape[0], df.shape[1], max_rows,
+        )
+    elif isinstance(df, pl.LazyFrame):
+        df: pl.LazyFrame
+        logger.info(
+            "Graphic Walker running on %s — n rows x %d cols, max_rows=%s",
+            url, len(df.collect_schema().names()), max_rows,
+        )
     if open_browser:
         try:
             webbrowser.open(url)

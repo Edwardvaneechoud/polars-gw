@@ -338,22 +338,12 @@ def _apply_raw(lf: pl.LazyFrame, query: dict) -> pl.LazyFrame:
     return lf
 
 
-# ---------------------------------------------------------------------------
-# Sort
-# ---------------------------------------------------------------------------
-
-
 def _apply_sort(lf: pl.LazyFrame, by: list[str], sort_dir: str) -> pl.LazyFrame:
     schema = lf.collect_schema()
     by = [b for b in by if b in schema]
     if not by:
         return lf
     return lf.sort(by=by, descending=sort_dir == "descending")
-
-
-# ---------------------------------------------------------------------------
-# Transform (computed fields)
-# ---------------------------------------------------------------------------
 
 
 def _apply_transforms(lf: pl.LazyFrame, transforms: list[dict]) -> pl.LazyFrame:
@@ -574,11 +564,6 @@ def _build_transform_expr(expression: dict, schema: pl.Schema) -> pl.Expr | None
     return None
 
 
-# ---------------------------------------------------------------------------
-# JSON serialization
-# ---------------------------------------------------------------------------
-
-
 def _sanitize_for_json(lf: pl.LazyFrame) -> list[dict[str, Any]]:
     """Collect the lazy plan and convert to JSON-safe dicts.
 
@@ -597,4 +582,4 @@ def _sanitize_for_json(lf: pl.LazyFrame) -> list[dict[str, Any]]:
             cast_exprs.append(pl.col(col_name).cast(pl.Float64))
     if cast_exprs:
         lf = lf.with_columns(cast_exprs)
-    return lf.collect().to_dicts()
+    return lf.collect(engine="streaming").to_dicts()
