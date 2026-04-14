@@ -57,27 +57,37 @@ except ImportError as _exc:  # pragma: no cover - exercised only without extras 
     _VIZ_IMPORT_ERROR = _exc
 
 
-# Pinned Graphic Walker version.  UMD build is loaded from jsdelivr so no
-# bundle needs to ship inside the wheel.
+# Pinned Graphic Walker + React versions.  Loaded as ESM via esm.sh so we
+# don't need a bundler and `process.env.NODE_ENV` is auto-shimmed for the
+# browser.  `?deps=react@...` pins React to a single instance across all
+# modules — otherwise you get the classic "Invalid hook call" error.
 _GW_VERSION = "0.4.81"
+_REACT_VERSION = "18.2.0"
+_ESM_DEPS = f"deps=react@{_REACT_VERSION},react-dom@{_REACT_VERSION}"
 
 _HTML_TEMPLATE = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <title>Graphic Walker — gw-polars</title>
-  <script crossorigin src="https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js"></script>
-  <script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js"></script>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@kanaries/graphic-walker@{_GW_VERSION}/dist/style.css">
-  <script src="https://cdn.jsdelivr.net/npm/@kanaries/graphic-walker@{_GW_VERSION}/dist/graphic-walker.umd.js"></script>
+  <link rel="stylesheet" href="https://esm.sh/@kanaries/graphic-walker@{_GW_VERSION}/dist/style.css">
   <style>
     html, body, #root {{ margin: 0; padding: 0; height: 100%; width: 100%; }}
     body {{ font-family: system-ui, sans-serif; }}
+    #gwp-error {{
+      padding: 1rem 1.25rem; margin: 1rem; border: 1px solid #f5c2c7;
+      background: #f8d7da; color: #842029; border-radius: 4px;
+      font-family: ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap;
+    }}
   </style>
 </head>
 <body>
   <div id="root"></div>
-  <script>
+  <script type="module">
+    import React from "https://esm.sh/react@{_REACT_VERSION}";
+    import {{ createRoot }} from "https://esm.sh/react-dom@{_REACT_VERSION}/client";
+    import {{ GraphicWalker }} from "https://esm.sh/@kanaries/graphic-walker@{_GW_VERSION}?{_ESM_DEPS}";
+
     const computation = async (payload) => {{
       const r = await fetch("/api/compute", {{
         method: "POST",
@@ -87,17 +97,22 @@ _HTML_TEMPLATE = f"""<!DOCTYPE html>
       if (!r.ok) throw new Error("compute failed: " + r.status);
       return await r.json();
     }};
-    (async () => {{
+
+    try {{
       const fields = await fetch("/api/fields", {{ method: "POST" }}).then(r => r.json());
-      const Walker = (window.GraphicWalker && window.GraphicWalker.GraphicWalker)
-        || window.GraphicWalker;
-      const root = ReactDOM.createRoot(document.getElementById("root"));
-      root.render(React.createElement(Walker, {{
-        fields: fields,
-        computation: computation,
+      const root = createRoot(document.getElementById("root"));
+      root.render(React.createElement(GraphicWalker, {{
+        fields,
+        computation,
         appearance: "light",
       }}));
-    }})();
+    }} catch (e) {{
+      const el = document.createElement("div");
+      el.id = "gwp-error";
+      el.textContent = "Failed to load Graphic Walker:\\n" + (e && e.stack || e);
+      document.body.appendChild(el);
+      throw e;
+    }}
   </script>
 </body>
 </html>
