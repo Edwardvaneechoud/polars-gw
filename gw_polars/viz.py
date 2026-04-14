@@ -196,6 +196,7 @@ def walk(
     open_browser: bool = True,
     max_rows: int | None = DEFAULT_MAX_ROWS,
     log_level: str = "info",
+    field_overrides: dict[str, dict[str, Any]] | None = None,
 ) -> WalkHandle:
     """Launch a local Graphic Walker UI connected to ``df``.
 
@@ -219,6 +220,10 @@ def walk(
             and for uvicorn's request logs.  Defaults to ``"info"`` so
             you see compute timings + cap warnings in the REPL.  Set
             to ``"warning"`` for less noise, ``"debug"`` for more.
+        field_overrides: Forwarded to :func:`get_fields` — shallow-merge
+            override for any per-field key (``analyticType``,
+            ``semanticType``, ``aggName``, …). Useful when the dtype rule
+            mis-labels a column (e.g. an int code that should be a measure).
 
     Returns:
         A :class:`WalkHandle` with ``.url`` and ``.stop()``.
@@ -232,7 +237,7 @@ def walk(
     if isinstance(df, pl.LazyFrame):
         df = df.collect()
 
-    fields = get_fields(df)
+    fields = get_fields(df, field_overrides=field_overrides)
 
     app = FastAPI()
     app.add_middleware(
