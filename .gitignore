@@ -211,3 +211,6 @@ marimo/_lsp/
 __marimo__/
 *.parquet
 test.py
+.idea
+js/node_modules
+example/node_modules
