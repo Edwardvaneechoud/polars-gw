@@ -63,7 +63,7 @@ except ImportError as _exc:  # pragma: no cover - exercised only without extras 
     _VIZ_IMPORT_ERROR = _exc
 
 
-_ASSETS_PACKAGE = "polars_gw.viz_assets"
+_ASSETS_PACKAGE = "polars_gw_viz"
 
 
 def _assets_dir() -> str:

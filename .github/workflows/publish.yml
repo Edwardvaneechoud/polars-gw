@@ -8,14 +8,25 @@ permissions:
   id-token: write
 
 jobs:
-  publish:
+  publish-viz:
     runs-on: ubuntu-latest
     environment: pypi
     steps:
       - uses: actions/checkout@v4
-
       - uses: astral-sh/setup-uv@v6
-
-      - run: uv build
-
+      - run: uv build viz_pkg/
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: viz_pkg/dist/
+
+  publish-core:
+    needs: publish-viz
+    runs-on: ubuntu-latest
+    environment: pypi
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv build
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
