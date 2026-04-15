@@ -809,7 +809,7 @@ class TestSanitization:
         assert isinstance(result[0]["date"], str)
 
     def test_nullable_values(self):
-        df = pl.DataFrame({"a": [1, None, 3], "b": ["x", None, "z"]})
+        df = pl.LazyFrame({"a": [1, None, 3], "b": ["x", None, "z"]})
         result = execute_workflow(df, {"workflow": []})
         assert len(result) == 3
         assert result == [{'a': 1, 'b': 'x'}, {'a': None, 'b': None}, {'a': 3, 'b': 'z'}]
@@ -817,16 +817,11 @@ class TestSanitization:
         assert result[1]["b"] is None
 
     def test_nullable_values_per_col(self):
-        df = pl.DataFrame({"a": [None, None, None], "b": ["x", "xx", "z"]})
+        df = pl.LazyFrame({"a": [None, None, None], "b": ["x", "xx", "z"]})
         result = execute_workflow(df, {"workflow": []})
         assert len(result) == 3
         assert all(len(_row) == 2 for _row in result)
         assert result == [{'a': None, 'b': 'x'}, {'a': None, 'b': 'xx'}, {'a': None, 'b': 'z'}]
-
-
-# ---------------------------------------------------------------------------
-# max_rows tests
-# ---------------------------------------------------------------------------
 
 
 class TestMaxRows:
