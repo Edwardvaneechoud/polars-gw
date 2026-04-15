@@ -3,10 +3,8 @@
 import datetime
 
 import polars as pl
-import pytest
 
 from gw_polars.executor import execute_workflow
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -112,6 +110,30 @@ class TestFilterRegexp:
         }
         result = execute_workflow(_sample_df(), payload)
         assert all(r["city"].startswith("A") for r in result)
+
+    def test_regexp_default_case_sensitive(self):
+        """Without caseSensitive flag, match is case-sensitive."""
+        payload = {
+            "workflow": [
+                {"type": "filter", "filters": [
+                    {"fid": "city", "rule": {"type": "regexp", "value": "^a"}}
+                ]}
+            ]
+        }
+        result = execute_workflow(_sample_df(), payload)
+        assert len(result) == 0  # No city starts with lowercase 'a'
+
+    def test_regexp_case_insensitive(self):
+        payload = {
+            "workflow": [
+                {"type": "filter", "filters": [
+                    {"fid": "city", "rule": {"type": "regexp", "value": "^a", "caseSensitive": False}}
+                ]}
+            ]
+        }
+        result = execute_workflow(_sample_df(), payload)
+        assert len(result) == 2  # Amsterdam x 2
+        assert all(r["city"] == "Amsterdam" for r in result)
 
 
 class TestFilterTemporalRange:
@@ -251,6 +273,116 @@ class TestAggregate:
         result = execute_workflow(_sample_df(), payload)
         # No valid agg exprs → returns original df unchanged
         assert len(result) == 5
+
+    def test_empty_measures_returns_distinct_group_by(self):
+        """GW sends aggregate with measures=[] to fetch distinct dimension values."""
+        payload = {
+            "workflow": [
+                {"type": "view", "query": [
+                    {"op": "aggregate", "groupBy": ["city"], "measures": []}
+                ]}
+            ]
+        }
+        result = execute_workflow(_sample_df(), payload)
+        # 3 unique cities: Amsterdam, Berlin, Paris
+        assert len(result) == 3
+        assert {r["city"] for r in result} == {"Amsterdam", "Berlin", "Paris"}
+        # Only the group-by column should be returned
+        assert set(result[0].keys()) == {"city"}
+
+    def test_count_star_group_by(self):
+        """GW sends count(*) as field='*', agg='count' — count all rows per group."""
+        payload = {
+            "workflow": [
+                {"type": "view", "query": [
+                    {
+                        "op": "aggregate",
+                        "groupBy": ["city"],
+                        "measures": [{"field": "*", "agg": "count", "asFieldKey": "n"}],
+                    }
+                ]}
+            ]
+        }
+        result = execute_workflow(_sample_df(), payload)
+        result_map = {r["city"]: r["n"] for r in result}
+        assert result_map == {"Amsterdam": 2, "Berlin": 2, "Paris": 1}
+
+    def test_count_star_no_group(self):
+        """count(*) with no group_by returns total row count."""
+        payload = {
+            "workflow": [
+                {"type": "view", "query": [
+                    {
+                        "op": "aggregate",
+                        "groupBy": [],
+                        "measures": [{"field": "*", "agg": "count", "asFieldKey": "total"}],
+                    }
+                ]}
+            ]
+        }
+        result = execute_workflow(_sample_df(), payload)
+        assert result == [{"total": 5}]
+
+    def test_count_star_counts_nulls(self):
+        """Unlike count(col) which skips nulls, count(*) counts every row."""
+        df = pl.DataFrame({"group": ["a", "a", "b"], "value": [1, None, None]})
+        payload = {
+            "workflow": [
+                {"type": "view", "query": [
+                    {
+                        "op": "aggregate",
+                        "groupBy": ["group"],
+                        "measures": [{"field": "*", "agg": "count", "asFieldKey": "n"}],
+                    }
+                ]}
+            ]
+        }
+        result = execute_workflow(df, payload)
+        result_map = {r["group"]: r["n"] for r in result}
+        assert result_map == {"a": 2, "b": 1}
+
+    def test_agg_expr(self):
+        """agg='expr' evaluates a SQL aggregation expression."""
+        payload = {
+            "workflow": [
+                {"type": "view", "query": [
+                    {
+                        "op": "aggregate",
+                        "groupBy": ["city"],
+                        "measures": [
+                            {
+                                "field": "",
+                                "agg": "expr",
+                                "expression": "SUM(sales) / SUM(quantity)",
+                                "asFieldKey": "avg_price",
+                            }
+                        ],
+                    }
+                ]}
+            ]
+        }
+        result = execute_workflow(_sample_df(), payload)
+        result_map = {r["city"]: r["avg_price"] for r in result}
+        # Amsterdam: (100+150)/(10+15) = 10; Berlin: (200+250)/(20+25) = 10; Paris: 300/30 = 10
+        assert result_map == {"Amsterdam": 10.0, "Berlin": 10.0, "Paris": 10.0}
+
+    def test_empty_measures_multi_column_distinct(self):
+        """measures=[] with multiple groupBy cols → distinct combinations."""
+        payload = {
+            "workflow": [
+                {"type": "view", "query": [
+                    {"op": "aggregate", "groupBy": ["city", "category"], "measures": []}
+                ]}
+            ]
+        }
+        result = execute_workflow(_sample_df(), payload)
+        # Expect unique (city, category) pairs from the 5-row sample
+        pairs = {(r["city"], r["category"]) for r in result}
+        assert pairs == {
+            ("Amsterdam", "A"),
+            ("Berlin", "B"),
+            ("Paris", "A"),
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -393,6 +525,11 @@ class TestSort:
 
 class TestTransform:
     def test_bin_transform(self):
+        """GW `bin` returns [lowerBound, upperBound] per row (equal-width binning).
+
+        Matches graphic-walker/src/lib/execExp.ts — the frontend renders the
+        pair as the chart's category label, not a bin index.
+        """
         df = pl.DataFrame({"age": [5, 15, 25, 35, 45, 55, 65, 75, 85, 95]})
         payload = {
             "workflow": [
@@ -403,9 +540,32 @@ class TestTransform:
         }
         result = execute_workflow(df, payload)
         assert all("age_bin" in r for r in result)
-        # 5 bins over 5-95, width = 18. bin(5)=0, bin(95)=4
-        assert result[0]["age_bin"] == 0
-        assert result[-1]["age_bin"] == 4
+        # 5 bins over [5, 95], step = 18.  First value (5) → [5, 23];
+        # last value (95) falls in the final bin → [77, 95].
+        assert result[0]["age_bin"] == [5.0, 23.0]
+        assert result[-1]["age_bin"] == [77.0, 95.0]
+        # Every row's bin is a 2-element list in the original numeric scale.
+        for row in result:
+            assert isinstance(row["age_bin"], list) and len(row["age_bin"]) == 2
+
+    def test_bin_count_transform(self):
+        """GW `binCount` returns a 1-indexed quantile-rank bucket in 1..num.
+
+        Equal-frequency binning: rows are sorted by value and split into
+        `num` contiguous groups of ~N/num rows each.
+        """
+        df = pl.DataFrame({"val": list(range(20))})
+        payload = {
+            "workflow": [
+                {"type": "transform", "transform": [
+                    {"key": "q", "expression": {"op": "binCount", "params": ["val"], "as": "q", "num": 4}}
+                ]}
+            ]
+        }
+        result = execute_workflow(df, payload)
+        qs = [r["q"] for r in result]
+        # 20 rows / 4 bins = 5 rows per bin, 1-indexed.
+        assert qs == [1] * 5 + [2] * 5 + [3] * 5 + [4] * 5
 
     def test_log_transform(self):
         df = pl.DataFrame({"val": [1.0, 10.0, 100.0]})
@@ -422,6 +582,7 @@ class TestTransform:
         assert abs(result[2]["log_val"] - 2.0) < 0.01
 
     def test_datetime_drill(self):
+        """dateTimeDrill truncates a datetime to the start of the unit (here: month)."""
         df = _temporal_df()
         payload = {
             "workflow": [
@@ -432,7 +593,158 @@ class TestTransform:
         }
         result = execute_workflow(df, payload)
         months = [r["month"] for r in result]
-        assert months == [1, 3, 6, 9, 12]
+        # Date columns are serialized as ISO strings by _sanitize_for_json.
+        assert months == ["2024-01-01", "2024-03-01", "2024-06-01", "2024-09-01", "2024-12-01"]
+
+    def test_datetime_drill_dict_params(self):
+        """GW sometimes wraps transform params as dicts: {"field": ...}, {"value": ...}."""
+        df = _temporal_df()
+        payload = {
+            "workflow": [
+                {"type": "transform", "transform": [
+                    {
+                        "key": "quarter",
+                        "expression": {
+                            "op": "dateTimeDrill",
+                            "params": [{"field": "date"}, {"value": "quarter"}],
+                            "as": "quarter",
+                        },
+                    }
+                ]}
+            ]
+        }
+        result = execute_workflow(df, payload)
+        quarters = [r["quarter"] for r in result]
+        assert quarters == ["2024-01-01", "2024-01-01", "2024-04-01", "2024-07-01", "2024-10-01"]
+
+    def test_datetime_drill_display_offset(self):
+        """displayOffset shifts truncation boundaries into the user's local TZ.
+
+        The payload format mirrors what GW sends: params include
+        ``{"type": "displayOffset", "value": <minutes>}``.  Here -120 means
+        UTC+2, so a UTC timestamp at 22:30 should bucket into the *next*
+        local calendar day.
+        """
+        df = pl.DataFrame({"dt": [
+            datetime.datetime(2024, 3, 15, 22, 30),  # UTC = local 2024-03-16 00:30 (UTC+2)
+            datetime.datetime(2024, 3, 15, 23, 30),  # UTC = local 2024-03-16 01:30
+            datetime.datetime(2024, 3, 15, 1, 0),    # UTC = local 2024-03-15 03:00
+        ]})
+        payload = {
+            "workflow": [
+                {"type": "transform", "transform": [
+                    {
+                        "key": "day",
+                        "expression": {
+                            "op": "dateTimeDrill",
+                            "as": "day",
+                            "params": [
+                                {"type": "field", "value": "dt"},
+                                {"type": "value", "value": "day"},
+                                {"type": "offset", "value": -120},
+                                {"type": "displayOffset", "value": -120},
+                            ],
+                        },
+                    }
+                ]}
+            ]
+        }
+        result = execute_workflow(df, payload)
+        days = [r["day"] for r in result]
+        # First two rows fall on local 2024-03-16, third on local 2024-03-15.
+        # Returned values stay in the source's UTC frame, so local midnight of
+        # 2024-03-16 (UTC+2) is 2024-03-15 22:00:00 UTC, and local midnight of
+        # 2024-03-15 (UTC+2) is 2024-03-14 22:00:00 UTC.
+        assert days == [
+            "2024-03-15 22:00:00.000000",
+            "2024-03-15 22:00:00.000000",
+            "2024-03-14 22:00:00.000000",
+        ]
+
+    def test_datetime_feature(self):
+        """dateTimeFeature is the canonical GW op for extracting a temporal component."""
+        df = _temporal_df()
+        payload = {
+            "workflow": [
+                {"type": "transform", "transform": [
+                    {
+                        "key": "month",
+                        "expression": {
+                            "op": "dateTimeFeature",
+                            "params": [{"field": "date"}, {"value": "month"}],
+                            "as": "month",
+                        },
+                    }
+                ]}
+            ]
+        }
+        result = execute_workflow(df, payload)
+        assert [r["month"] for r in result] == [1, 3, 6, 9, 12]
+
+    def test_expr_transform(self):
+        """op='expr' evaluates an arbitrary SQL-ish expression via pl.sql_expr."""
+        df = pl.DataFrame({"a": [1, 2, 3], "b": [10, 20, 30]})
+        payload = {
+            "workflow": [
+                {"type": "transform", "transform": [
+                    {
+                        "key": "total",
+                        "expression": {
+                            "op": "expr",
+                            "params": [{"type": "sql", "value": "a + b"}],
+                            "as": "total",
+                        },
+                    }
+                ]}
+            ]
+        }
+        result = execute_workflow(df, payload)
+        assert [r["total"] for r in result] == [11, 22, 33]
+
+    def test_paint_transform_is_skipped(self):
+        """paint transform is not supported — logs a warning and leaves df unchanged."""
+        payload = {
+            "workflow": [
+                {"type": "transform", "transform": [
+                    {"key": "color", "expression": {"op": "paint", "params": [], "as": "color"}}
+                ]}
+            ]
+        }
+        result = execute_workflow(_sample_df(), payload)
+        assert len(result) == 5  # Unchanged
+        assert "color" not in result[0]
+
+    def test_one_transform_adds_constant_column(self):
+        """GW's 'Row Count' helper: op='one' creates a constant 1 column."""
+        payload = {
+            "workflow": [
+                {"type": "transform", "transform": [
+                    {"key": "gw_count_fid", "expression": {"op": "one", "params": [], "as": "gw_count_fid"}}
+                ]}
+            ]
+        }
+        result = execute_workflow(_sample_df(), payload)
+        assert all(r["gw_count_fid"] == 1 for r in result)
+
+    def test_row_count_workflow(self):
+        """End-to-end: GW's Row Count = one transform + sum aggregate."""
+        payload = {
+            "workflow": [
+                {"type": "transform", "transform": [
+                    {"key": "gw_count_fid", "expression": {"op": "one", "params": [], "as": "gw_count_fid"}}
+                ]},
+                {"type": "view", "query": [
+                    {
+                        "op": "aggregate",
+                        "groupBy": ["city"],
+                        "measures": [{"field": "gw_count_fid", "agg": "sum", "asFieldKey": "row_count"}],
+                    }
+                ]},
+            ]
+        }
+        result = execute_workflow(_sample_df(), payload)
+        result_map = {r["city"]: r["row_count"] for r in result}
+        assert result_map == {"Amsterdam": 2, "Berlin": 2, "Paris": 1}
 
 
 # ---------------------------------------------------------------------------
@@ -497,7 +809,47 @@ class TestSanitization:
         assert isinstance(result[0]["date"], str)
 
     def test_nullable_values(self):
-        df = pl.DataFrame({"a": [1, None, 3], "b": ["x", None, "z"]})
+        df = pl.LazyFrame({"a": [1, None, 3], "b": ["x", None, "z"]})
         result = execute_workflow(df, {"workflow": []})
+        assert len(result) == 3
+        assert result == [{'a': 1, 'b': 'x'}, {'a': None, 'b': None}, {'a': 3, 'b': 'z'}]
         assert result[1]["a"] is None
         assert result[1]["b"] is None
+
+    def test_nullable_values_per_col(self):
+        df = pl.LazyFrame({"a": [None, None, None], "b": ["x", "xx", "z"]})
+        result = execute_workflow(df, {"workflow": []})
+        assert len(result) == 3
+        assert all(len(_row) == 2 for _row in result)
+        assert result == [{'a': None, 'b': 'x'}, {'a': None, 'b': 'xx'}, {'a': None, 'b': 'z'}]
+
+
+class TestMaxRows:
+    def test_custom_max_rows(self):
+        result = execute_workflow(_sample_df(), {"workflow": []}, max_rows=3)
+        assert len(result) == 3
+
+    def test_max_rows_none_disables(self):
+        result = execute_workflow(_sample_df(), {"workflow": []}, max_rows=None)
+        assert len(result) == 5
+
+    def test_max_rows_smaller_than_payload_limit(self):
+        """max_rows caps even when payload limit is larger."""
+        payload = {"workflow": [], "limit": 4}
+        result = execute_workflow(_sample_df(), payload, max_rows=2)
+        assert len(result) == 2
+
+    def test_payload_limit_smaller_than_max_rows(self):
+        """Payload limit wins when it is smaller than max_rows."""
+        payload = {"workflow": [], "limit": 2}
+        result = execute_workflow(_sample_df(), payload, max_rows=100)
+        assert len(result) == 2
+
+    def test_default_cap_applied(self):
+        """Default max_rows (1M) is applied — result is capped, not unlimited."""
+        from gw_polars.executor import DEFAULT_MAX_ROWS
+
+        assert DEFAULT_MAX_ROWS == 1_000_000
+        # Just verify the parameter default works (don't allocate 1M+ rows)
+        result = execute_workflow(_sample_df(), {"workflow": []})
+        assert len(result) == 5  # 5 < 1M, so all rows returned

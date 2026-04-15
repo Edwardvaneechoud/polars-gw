@@ -2,41 +2,182 @@
 
 from __future__ import annotations
 
+import contextvars
+import hashlib
+import json
+import logging
+import uuid
 from typing import Any
 
 import polars as pl
 
+from gw_polars.types import (
+    AggQuery,
+    BinQuery,
+    FieldTransform,
+    FilterRule,
+    FoldQuery,
+    IDataQueryPayload,
+    RawQuery,
+    SortDirection,
+    TransformExpression,
+    ViewQuery,
+    VisFilter,
+)
 
-def execute_workflow(df: pl.DataFrame, payload: dict[str, Any]) -> list[dict[str, Any]]:
+logger = logging.getLogger(__name__)
+
+# Per-request ID so concurrent execute_workflow calls can be disentangled in the logs.
+_request_id: contextvars.ContextVar[str] = contextvars.ContextVar("gw_polars_request_id", default="")
+
+
+def _log(level: int, msg: str, *args: Any) -> None:
+    rid = _request_id.get()
+    logger.log(level, (f"[{rid}] " if rid else "") + msg, *args)
+
+
+DEFAULT_MAX_ROWS: int = 1_000_000
+
+_CACHE_MAX_ENTRIES: int = 64
+_cache: dict[str, list[dict[str, Any]]] = {}
+
+
+def _cache_key(df_id: int, payload: IDataQueryPayload, max_rows: int | None) -> str:
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.md5(raw.encode(), usedforsecurity=False).hexdigest()
+    return f"{df_id}|{digest}|{max_rows}"
+
+
+def clear_cache() -> None:
+    """Drop all cached query results."""
+    _cache.clear()
+
+
+def execute_workflow(
+    df: pl.DataFrame | pl.LazyFrame,
+    payload: IDataQueryPayload,
+    *,
+    max_rows: int | None = DEFAULT_MAX_ROWS,
+) -> list[dict[str, Any]]:
     """Execute a Graphic Walker IDataQueryPayload against a Polars DataFrame.
 
+    The entire workflow is built as a lazy query plan and collected once at
+    the end, letting Polars optimise predicate push-down and projection.
+
+    Results are cached by payload so that duplicate queries (common when
+    reshuffling fields in the UI) return instantly.
+
     Args:
-        df: The source DataFrame to query.
+        df: The source DataFrame (or LazyFrame) to query.
         payload: A Graphic Walker IDataQueryPayload dict with keys:
             - workflow: list of workflow steps
             - limit: optional row limit
             - offset: optional row offset
+        max_rows: Hard cap on the number of rows returned.  Applied after all
+            workflow steps and payload limit/offset.  Set to ``None`` to
+            disable.  Defaults to :data:`DEFAULT_MAX_ROWS` (1 000 000).
 
     Returns:
         A list of row dicts (IRow[]) suitable for returning to Graphic Walker.
     """
-    for step in payload.get("workflow", []):
-        step_type = step.get("type")
-        if step_type == "filter":
-            df = _apply_filters(df, step.get("filters", []))
-        elif step_type == "view":
-            df = _apply_view_queries(df, step.get("query", []))
-        elif step_type == "sort":
-            df = _apply_sort(df, step.get("by", []), step.get("sort", "ascending"))
-        elif step_type == "transform":
-            df = _apply_transforms(df, step.get("transform", []))
+    rid_token = _request_id.set(uuid.uuid4().hex[:8])
+    try:
+        key = _cache_key(id(df), payload, max_rows)
+        cached = _cache.get(key)
+        if cached is not None:
+            _log(logging.INFO, "execute_workflow: cache hit (%d row(s))", len(cached))
+            return cached
 
-    limit = payload.get("limit")
-    if limit is not None:
-        offset = payload.get("offset", 0) or 0
-        df = df.slice(offset, limit)
+        lf = df
 
-    return _sanitize_for_json(df)
+        workflow = payload.get("workflow", [])
+        _log(logging.INFO, "execute_workflow: %d step(s), max_rows=%s", len(workflow), max_rows)
+        _log(logging.DEBUG, "payload=%r", payload)
+
+        for i, step in enumerate(workflow):
+            step_type = step.get("type")
+            if step_type == "filter":
+                filters = step.get("filters", [])
+                _log(
+                    logging.INFO,
+                    "  step %d: filter — %s",
+                    i,
+                    ", ".join(f"{f.get('fid')} {f.get('rule', {}).get('type')}" for f in filters) or "(none)",
+                )
+                lf = _apply_filters(lf, filters)
+            elif step_type == "view":
+                queries = step.get("query", [])
+                _log(
+                    logging.INFO,
+                    "  step %d: view — %s",
+                    i,
+                    ", ".join(_describe_view_query(q) for q in queries) or "(none)",
+                )
+                lf = _apply_view_queries(lf, queries)
+            elif step_type == "sort":
+                by = step.get("by", [])
+                direction = step.get("sort", "ascending")
+                _log(logging.INFO, "  step %d: sort — by=%s %s", i, by, direction)
+                lf = _apply_sort(lf, by, direction)
+            elif step_type == "transform":
+                transforms = step.get("transform", [])
+                _log(
+                    logging.INFO,
+                    "  step %d: transform — %s",
+                    i,
+                    ", ".join(f"{t.get('expression', {}).get('op')}->{t.get('key')}" for t in transforms) or "(none)",
+                )
+                lf = _apply_transforms(lf, transforms)
+            else:
+                _log(logging.WARNING, "  step %d: unknown step type %r", i, step_type)
+
+        limit = payload.get("limit")
+        if limit is not None:
+            offset = payload.get("offset", 0) or 0
+            _log(logging.INFO, "  slice: offset=%d, limit=%d", offset, limit)
+            lf = lf.slice(offset, limit)
+
+        if max_rows is not None:
+            lf = lf.head(max_rows)
+
+        result = _sanitize_for_json(lf)
+
+        if max_rows is not None and len(result) == max_rows:
+            _log(
+                logging.WARNING,
+                "Result capped at max_rows=%d — output may be truncated. "
+                "Pass a larger max_rows or max_rows=None to disable.",
+                max_rows,
+            )
+        _log(logging.INFO, "execute_workflow: returned %d row(s)", len(result))
+        _log(logging.DEBUG, f"execute_workflow: returned {str(result[:min(len(result), 20)])}")
+
+        if len(_cache) >= _CACHE_MAX_ENTRIES:
+            evict_key = next(iter(_cache))
+            del _cache[evict_key]
+        _cache[key] = result
+
+        return result
+    finally:
+        _request_id.reset(rid_token)
+
+
+def _describe_view_query(query: ViewQuery) -> str:
+    """Short human-readable summary of a view query for logging."""
+    op = query.get("op")
+    if op == "aggregate":
+        group_by = query.get("groupBy", [])
+        measures = [f"{m.get('agg')}({m.get('field')})" for m in query.get("measures", [])]
+        if not measures and group_by:
+            return f"distinct {group_by}"
+        return f"aggregate by={group_by} measures=[{', '.join(measures)}]"
+    if op == "fold":
+        return f"fold on={query.get('foldBy', [])}"
+    if op == "bin":
+        return f"bin {query.get('binBy')} size={query.get('binSize', 10)}"
+    if op == "raw":
+        return f"raw fields={query.get('fields', [])}"
+    return f"{op}?"
 
 
 # ---------------------------------------------------------------------------
@@ -44,59 +185,80 @@ def execute_workflow(df: pl.DataFrame, payload: dict[str, Any]) -> list[dict[str
 # ---------------------------------------------------------------------------
 
 
-def _apply_filters(df: pl.DataFrame, filters: list[dict]) -> pl.DataFrame:
+def _apply_filters(lf: pl.LazyFrame | pl.DataFrame, filters: list[VisFilter]) -> pl.LazyFrame:
+    """Combine all filter predicates into a single .filter() call."""
+    schema = lf.collect_schema()
+    exprs: list[pl.Expr] = []
     for f in filters:
         fid = f.get("fid")
         rule = f.get("rule", {})
-        if not fid or fid not in df.columns:
+        if not fid or fid not in schema:
             continue
-        df = _apply_single_filter(df, fid, rule)
-    return df
+        expr = _build_filter_expr(fid, rule, schema)
+        if expr is not None:
+            exprs.append(expr)
+    if exprs:
+        combined = exprs[0]
+        for e in exprs[1:]:
+            combined = combined & e
+        lf = lf.filter(combined)
+    return lf
 
 
-def _apply_single_filter(df: pl.DataFrame, fid: str, rule: dict) -> pl.DataFrame:
+def _build_filter_expr(fid: str, rule: FilterRule, schema: pl.Schema) -> pl.Expr | None:
     rule_type = rule.get("type")
     value = rule.get("value")
 
     if rule_type == "range":
         low, high = value[0], value[1]
-        expr = pl.col(fid)
+        col = pl.col(fid)
         if low is not None and high is not None:
-            df = df.filter(expr.is_between(low, high))
-        elif low is not None:
-            df = df.filter(expr >= low)
-        elif high is not None:
-            df = df.filter(expr <= high)
+            return col.is_between(low, high)
+        if low is not None:
+            return col >= low
+        if high is not None:
+            return col <= high
 
     elif rule_type == "temporal range":
         low, high = value[0], value[1]
-        col_expr = pl.col(fid)
-        dtype = df[fid].dtype
+        # Optional timezone/offset in minutes — shift the user-supplied bounds
+        # so they align with the column's UTC epoch-ms representation.
+        offset_min = rule.get("offset") or 0
+        offset_ms = offset_min * 60_000
+        dtype = schema[fid]
+        col = pl.col(fid)
         if dtype == pl.Date:
-            col_expr = col_expr.cast(pl.Datetime).dt.timestamp("ms")
-        elif dtype in (pl.Datetime, pl.Datetime("ns"), pl.Datetime("us"), pl.Datetime("ms")):
-            col_expr = col_expr.dt.timestamp("ms")
+            col = col.cast(pl.Datetime).dt.timestamp("ms")
+        elif dtype.base_type() == pl.Datetime:
+            col = col.dt.timestamp("ms")
+        if low is not None:
+            low = low - offset_ms
+        if high is not None:
+            high = high - offset_ms
         if low is not None and high is not None:
-            df = df.filter(col_expr.is_between(low, high))
-        elif low is not None:
-            df = df.filter(col_expr >= low)
-        elif high is not None:
-            df = df.filter(col_expr <= high)
+            return col.is_between(low, high)
+        if low is not None:
+            return col >= low
+        if high is not None:
+            return col <= high
 
     elif rule_type == "one of":
         if value is not None and len(value) > 0:
-            df = df.filter(pl.col(fid).is_in(value))
+            return pl.col(fid).is_in(value)
 
     elif rule_type == "not in":
         if value is not None and len(value) > 0:
-            df = df.filter(~pl.col(fid).is_in(value))
+            return ~pl.col(fid).is_in(value)
 
     elif rule_type == "regexp":
         pattern = rule.get("value", "")
         if pattern:
-            df = df.filter(pl.col(fid).cast(pl.Utf8).str.contains(pattern))
+            # Graphic Walker's caseSensitive flag — default True when absent.
+            if rule.get("caseSensitive") is False and not pattern.startswith("(?i)"):
+                pattern = f"(?i){pattern}"
+            return pl.col(fid).cast(pl.Utf8).str.contains(pattern)
 
-    return df
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -104,42 +266,70 @@ def _apply_single_filter(df: pl.DataFrame, fid: str, rule: dict) -> pl.DataFrame
 # ---------------------------------------------------------------------------
 
 
-def _apply_view_queries(df: pl.DataFrame, queries: list[dict]) -> pl.DataFrame:
+def _apply_view_queries(lf: pl.LazyFrame | pl.DataFrame, queries: list[ViewQuery]) -> pl.LazyFrame:
     for query in queries:
         op = query.get("op")
         if op == "aggregate":
-            df = _apply_aggregate(df, query)
+            lf = _apply_aggregate(lf, query)
         elif op == "fold":
-            df = _apply_fold(df, query)
+            lf = _apply_fold(lf, query)
         elif op == "bin":
-            df = _apply_bin(df, query)
+            lf = _apply_bin(lf, query)
         elif op == "raw":
-            df = _apply_raw(df, query)
-    return df
+            lf = _apply_raw(lf, query)
+    return lf
 
 
-def _apply_aggregate(df: pl.DataFrame, query: dict) -> pl.DataFrame:
-    group_by = [g for g in query.get("groupBy", []) if g in df.columns]
+def _apply_aggregate(lf: pl.LazyFrame | pl.DataFrame, query: AggQuery) -> pl.LazyFrame:
+    schema = lf.collect_schema()
+    group_by = [g for g in query.get("groupBy", []) if g in schema]
     measures = query.get("measures", [])
 
-    agg_exprs = []
+    # No measures requested: Graphic Walker uses this to fetch the distinct
+    # values of a dimension (e.g. to populate a filter dropdown).  Without
+    # this branch we would fall through and return the entire DataFrame.
+    if not measures and group_by:
+        return lf.select(group_by).unique(maintain_order=True)
+
+    agg_exprs: list[pl.Expr] = []
     for m in measures:
         field = m.get("field")
         agg = m.get("agg")
-        alias = m.get("asFieldKey", field)
-        if not field or field not in df.columns:
+        alias = m.get("asFieldKey") or field or agg or "value"
+
+        # SQL-style count(*): Graphic Walker sends field="*" (or empty) for
+        # "count all rows".  Polars' pl.len() is the direct equivalent.
+        if agg == "count" and (not field or field == "*"):
+            agg_exprs.append(pl.len().alias(alias))
+            continue
+
+        # agg="expr": arbitrary SQL expression, e.g. "SUM(a) / SUM(b)".  The
+        # expression is taken from the measure's "expression" or "expr" field.
+        if agg == "expr":
+            sql = m.get("expression") or m.get("expr") or field
+            parsed = _parse_sql_expr(sql)
+            if parsed is None:
+                _log(logging.WARNING, "  skipping measure: agg='expr' expression=%r (could not parse)", sql)
+                continue
+            agg_exprs.append(parsed.alias(alias))
+            continue
+
+        if not field or field not in schema:
+            _log(logging.WARNING, "  skipping measure: field=%r agg=%r (field not in schema)", field, agg)
             continue
         expr = _build_agg_expr(field, agg)
-        if expr is not None:
-            agg_exprs.append(expr.alias(alias))
+        if expr is None:
+            _log(logging.WARNING, "  skipping measure: field=%r agg=%r (unsupported aggregator)", field, agg)
+            continue
+        agg_exprs.append(expr.alias(alias))
 
     if not agg_exprs:
-        return df
+        _log(logging.WARNING, "  aggregate: no valid measures, returning input unchanged")
+        return lf
 
     if group_by:
-        return df.group_by(group_by, maintain_order=True).agg(agg_exprs)
-    else:
-        return df.select(agg_exprs)
+        return lf.group_by(group_by, maintain_order=True).agg(agg_exprs)
+    return lf.select(agg_exprs)
 
 
 _AGG_MAP: dict[str, str] = {
@@ -157,140 +347,286 @@ _AGG_MAP: dict[str, str] = {
 
 
 def _build_agg_expr(field: str, agg: str) -> pl.Expr | None:
-    col = pl.col(field)
     if agg in _AGG_MAP:
-        return getattr(col, _AGG_MAP[agg])()
+        return getattr(pl.col(field), _AGG_MAP[agg])()
     return None
 
 
-def _apply_fold(df: pl.DataFrame, query: dict) -> pl.DataFrame:
-    fold_by = [f for f in query.get("foldBy", []) if f in df.columns]
+def _apply_fold(lf: pl.LazyFrame | pl.DataFrame, query: FoldQuery) -> pl.LazyFrame:
+    schema = lf.collect_schema()
+    fold_by = [f for f in query.get("foldBy", []) if f in schema]
     key_col = query.get("newFoldKeyCol", "key")
     value_col = query.get("newFoldValueCol", "value")
     if not fold_by:
-        return df
-    return df.unpivot(on=fold_by, variable_name=key_col, value_name=value_col)
+        return lf
+    return lf.unpivot(on=fold_by, variable_name=key_col, value_name=value_col)
 
 
-def _apply_bin(df: pl.DataFrame, query: dict) -> pl.DataFrame:
+def _apply_bin(lf: pl.LazyFrame | pl.DataFrame, query: BinQuery) -> pl.LazyFrame:
     bin_by = query.get("binBy")
     new_col = query.get("newBinCol", f"{bin_by}_bin")
     bin_size = query.get("binSize", 10)
-
-    if not bin_by or bin_by not in df.columns:
-        return df
-
-    min_val = df[bin_by].min()
-    max_val = df[bin_by].max()
-
-    if min_val is None or max_val is None or min_val == max_val:
-        return df.with_columns(pl.lit(0).alias(new_col))
-
-    return df.with_columns(
-        ((pl.col(bin_by) - min_val) / bin_size).floor().cast(pl.Int64).alias(new_col)
+    if not bin_by or bin_by not in lf.collect_schema():
+        return lf
+    col = pl.col(bin_by)
+    return lf.with_columns(
+        ((col - col.min()) / bin_size).floor().cast(pl.Int64).alias(new_col)
     )
 
 
-def _apply_raw(df: pl.DataFrame, query: dict) -> pl.DataFrame:
-    fields = [f for f in query.get("fields", []) if f in df.columns]
+def _apply_raw(lf: pl.LazyFrame | pl.DataFrame, query: RawQuery) -> pl.LazyFrame:
+    schema = lf.collect_schema()
+    fields = [f for f in query.get("fields", []) if f in schema]
     if fields:
-        return df.select(fields)
-    return df
+        return lf.select(fields)
+    return lf
 
 
-# ---------------------------------------------------------------------------
-# Sort
-# ---------------------------------------------------------------------------
-
-
-def _apply_sort(df: pl.DataFrame, by: list[str], sort_dir: str) -> pl.DataFrame:
-    by = [b for b in by if b in df.columns]
+def _apply_sort(lf: pl.LazyFrame | pl.DataFrame, by: list[str], sort_dir: SortDirection) -> pl.LazyFrame:
+    schema = lf.collect_schema()
+    by = [b for b in by if b in schema]
     if not by:
-        return df
-    descending = sort_dir == "descending"
-    return df.sort(by=by, descending=descending)
+        return lf
+    return lf.sort(by=by, descending=sort_dir == "descending")
 
 
-# ---------------------------------------------------------------------------
-# Transform (computed fields)
-# ---------------------------------------------------------------------------
-
-
-def _apply_transforms(df: pl.DataFrame, transforms: list[dict]) -> pl.DataFrame:
+def _apply_transforms(lf: pl.LazyFrame | pl.DataFrame, transforms: list[FieldTransform]) -> pl.LazyFrame:
     for t in transforms:
         key = t.get("key")
         expression = t.get("expression", {})
         if not key or not expression:
             continue
-        df = _apply_single_transform(df, key, expression)
-    return df
+        expr = _build_transform_expr(expression, lf.collect_schema())
+        if expr is None:
+            _log(
+                logging.WARNING,
+                "  skipping transform: op=%r params=%r (unsupported op or missing field)",
+                expression.get("op"),
+                expression.get("params"),
+            )
+            continue
+        lf = lf.with_columns(expr.alias(expression.get("as", key)))
+    return lf
 
 
-def _apply_single_transform(df: pl.DataFrame, key: str, expression: dict) -> pl.DataFrame:
+def _param_to_str(param: Any) -> str | None:
+    """Extract a string from a transform parameter.
+
+    Graphic Walker sometimes sends params as plain strings ("date_col",
+    "month") and sometimes as dicts ({"field": "date_col"}, {"value":
+    "month"}).  This helper normalises both shapes.
+    """
+    if isinstance(param, str):
+        return param
+    if isinstance(param, dict):
+        for key in ("field", "fid", "value", "name"):
+            v = param.get(key)
+            if isinstance(v, str):
+                return v
+    return None
+
+
+def _parse_sql_expr(sql: Any) -> pl.Expr | None:
+    """Translate a SQL-ish expression string to a Polars expression.
+
+    Used for GW's ``expr`` aggregator and ``expr`` transform op, where the
+    payload carries an arbitrary expression the user typed in the UI.
+    """
+    if not isinstance(sql, str) or not sql.strip():
+        return None
+    try:
+        return pl.sql_expr(sql)
+    except Exception as e:  # noqa: BLE001 - we genuinely want to swallow parse errors
+        _log(logging.WARNING, "  pl.sql_expr failed for %r: %s", sql, e)
+        return None
+
+
+_DATETIME_FEATURE_MAP: dict[str, str] = {
+    # GW granularity/feature label → Polars .dt method name
+    "year": "year",
+    "quarter": "quarter",
+    "month": "month",
+    "week": "week",
+    "day": "day",
+    "dayOfMonth": "day",
+    "dayOfYear": "ordinal_day",
+    "dayOfWeek": "weekday",
+    "weekday": "weekday",
+    "hour": "hour",
+    "minute": "minute",
+    "second": "second",
+}
+
+
+_DATETIME_DRILL_MAP: dict[str, str] = {
+    # GW drill unit → Polars dt.truncate interval string
+    "year": "1y",
+    "quarter": "1q",
+    "month": "1mo",
+    "week": "1w",
+    "day": "1d",
+    "hour": "1h",
+    "minute": "1m",
+    "second": "1s",
+}
+
+
+def _param_display_offset(params: list) -> int:
+    """Return the displayOffset (or offset) param as an int, or 0 if absent.
+
+    GW sends timezone offsets in JS ``Date.getTimezoneOffset()`` convention —
+    minutes, with positive meaning *behind* UTC.  We prefer ``displayOffset``
+    (the user's display TZ) and fall back to ``offset``.
+    """
+    chosen: int | None = None
+    fallback: int | None = None
+    for p in params:
+        if not isinstance(p, dict):
+            continue
+        ptype = p.get("type")
+        if ptype == "displayOffset":
+            v = p.get("value")
+            if isinstance(v, int | float):
+                chosen = int(v)
+        elif ptype == "offset":
+            v = p.get("value")
+            if isinstance(v, int | float):
+                fallback = int(v)
+    if chosen is not None:
+        return chosen
+    if fallback is not None:
+        return fallback
+    return 0
+
+
+def _build_transform_expr(expression: TransformExpression, schema: pl.Schema) -> pl.Expr | None:
     op = expression.get("op")
     params = expression.get("params", [])
-    as_field = expression.get("as", key)
+
+    # Graphic Walker's "Row Count" field: op="one" creates a constant-1 column
+    # that is then summed in a downstream aggregate to yield row counts.
+    if op == "one":
+        return pl.lit(1, dtype=pl.Int64)
+
+    # op="expr": arbitrary expression supplied as a SQL string.  Look for it
+    # in the standard params shape first, otherwise in a top-level field.
+    if op == "expr":
+        sql = None
+        for p in params:
+            if isinstance(p, dict) and p.get("type") in ("sql", "expression", "value"):
+                sql = p.get("value")
+                if isinstance(sql, str):
+                    break
+        if sql is None:
+            sql = expression.get("sql") or expression.get("expression")
+        return _parse_sql_expr(sql)
+
+    # op="paint": value/colour mapping used by GW's paint tool.  Mapping
+    # structure is complex and undocumented; log and return input unchanged
+    # (null expression) so the workflow doesn't crash.
+    if op == "paint":
+        _log(logging.WARNING, "  paint transform is not supported — skipping")
+        return None
 
     if op == "bin":
-        field = params[0] if params else None
+        # GW `bin`: equal-width binning, returns per-row [lowerBound, upperBound]
+        # in the field's native numeric scale.  The reference implementation is
+        # graphic-walker/src/lib/execExp.ts — it emits a 2-tuple per row and
+        # the frontend renders it as the chart's category label.
+        field = _param_to_str(params[0]) if params else None
         num_bins = expression.get("num", 10)
-        if field and field in df.columns:
-            min_val = df[field].min()
-            max_val = df[field].max()
-            if min_val is not None and max_val is not None and max_val > min_val:
-                bin_width = (max_val - min_val) / num_bins
-                df = df.with_columns(
-                    ((pl.col(field) - min_val) / bin_width).floor().cast(pl.Int64).clip(0, num_bins - 1).alias(as_field)
-                )
-            else:
-                df = df.with_columns(pl.lit(0).alias(as_field))
+        if field and field in schema:
+            col = pl.col(field)
+            col_min = col.min()
+            step = (col.max() - col_min) / num_bins
+            # Clip so col.max() falls into the last bin rather than a phantom
+            # bin N (mirrors `if (bIndex === binSize) bIndex = binSize - 1;`).
+            idx = (
+                pl.when(step > 0)
+                .then(((col - col_min) / step).floor().cast(pl.Int64).clip(0, num_bins - 1))
+                .otherwise(0)
+            )
+            lower = (col_min + idx * step).cast(pl.Float64)
+            upper = (col_min + (idx + 1) * step).cast(pl.Float64)
+            return pl.concat_list([lower, upper])
 
     elif op in ("log", "log2", "log10"):
-        field = params[0] if params else None
+        field = _param_to_str(params[0]) if params else None
         base_map = {"log": 2.718281828459045, "log2": 2, "log10": 10}
-        if field and field in df.columns:
-            df = df.with_columns(pl.col(field).log(base=base_map[op]).alias(as_field))
+        if field and field in schema:
+            return pl.col(field).log(base=base_map[op])
 
     elif op == "binCount":
-        field = params[0] if params else None
-        if field and field in df.columns:
-            df = df.with_columns(pl.col(field).alias(as_field))
+        # GW `binCount`: equal-frequency (quantile) binning, returns a
+        # 1-indexed bucket rank in 1..num.  Per execExp.ts, rows are sorted by
+        # value and split into `num` contiguous groups of ~N/num rows each.
+        field = _param_to_str(params[0]) if params else None
+        num_bins = expression.get("num", 10)
+        if field and field in schema:
+            col = pl.col(field)
+            # ordinal rank breaks ties deterministically by input order, which
+            # matches the reference's stable sort.
+            order_index = col.rank(method="ordinal") - 1  # 0-indexed
+            group_size = col.count() / num_bins
+            return (
+                pl.when(group_size > 0)
+                .then((order_index / group_size).floor().cast(pl.Int64).clip(0, num_bins - 1) + 1)
+                .otherwise(1)
+            )
 
     elif op == "dateTimeDrill":
-        field = params[0] if params else None
-        time_unit = params[1] if len(params) > 1 else "year"
-        if field and field in df.columns:
-            col_expr = pl.col(field)
-            drill_map = {
-                "year": col_expr.dt.year(),
-                "quarter": col_expr.dt.quarter(),
-                "month": col_expr.dt.month(),
-                "week": col_expr.dt.week(),
-                "day": col_expr.dt.day(),
-                "dayOfWeek": col_expr.dt.weekday(),
-                "hour": col_expr.dt.hour(),
-                "minute": col_expr.dt.minute(),
-                "second": col_expr.dt.second(),
-            }
-            expr = drill_map.get(time_unit, col_expr.dt.year())
-            df = df.with_columns(expr.alias(as_field))
+        # Truncate a datetime to the start of the requested unit (year, month,
+        # day, …).  Returns a datetime/date — not an integer component (that's
+        # what dateTimeFeature is for).
+        field = _param_to_str(params[0]) if params else None
+        time_unit = _param_to_str(params[1]) if len(params) > 1 else "year"
+        if field and field in schema:
+            interval = _DATETIME_DRILL_MAP.get(time_unit or "year")
+            if interval is None:
+                _log(logging.WARNING, "  dateTimeDrill: unknown unit %r — skipping", time_unit)
+                return None
+            display_offset = _param_display_offset(params)
+            expr = pl.col(field)
+            # Shift into the user's display TZ so day/week/etc. boundaries
+            # align with the local calendar, then truncate, then shift back so
+            # the returned values stay in the source column's timezone.
+            if display_offset:
+                shift = pl.duration(minutes=display_offset)
+                expr = (expr - shift).dt.truncate(interval) + shift
+            else:
+                expr = expr.dt.truncate(interval)
+            return expr
 
-    return df
+    elif op == "dateTimeFeature":
+        # Extract a numeric component (e.g. month → 3, dayOfWeek → 1).
+        field = _param_to_str(params[0]) if params else None
+        time_unit = _param_to_str(params[1]) if len(params) > 1 else "year"
+        if field and field in schema:
+            method = _DATETIME_FEATURE_MAP.get(time_unit or "year", "year")
+            return getattr(pl.col(field).dt, method)()
+
+    return None
 
 
-def _sanitize_for_json(df: pl.DataFrame) -> list[dict[str, Any]]:
-    """Convert a Polars DataFrame to a JSON-safe list of dicts.
+def _sanitize_for_json(lf: pl.LazyFrame | pl.DataFrame) -> list[dict[str, Any]]:
+    """Collect the lazy plan and convert to JSON-safe dicts.
 
-    Handles temporal types, Decimal, Duration, etc.
+    Batches all type casts into a single with_columns call.
     """
-    for col_name in df.columns:
-        dtype = df[col_name].dtype
-        if dtype in (pl.Date, pl.Datetime) or str(dtype).startswith("Datetime"):
-            df = df.with_columns(pl.col(col_name).cast(pl.Utf8))
+    schema = lf.collect_schema()
+    cast_exprs: list[pl.Expr] = []
+    for col_name, dtype in schema.items():
+        if dtype == pl.Date or dtype.base_type() == pl.Datetime:
+            cast_exprs.append(pl.col(col_name).cast(pl.Utf8))
         elif dtype == pl.Time:
-            df = df.with_columns(pl.col(col_name).cast(pl.Utf8))
-        elif dtype == pl.Duration or str(dtype).startswith("Duration"):
-            df = df.with_columns(pl.col(col_name).dt.total_milliseconds())
-        elif dtype == pl.Decimal or str(dtype).startswith("Decimal"):
-            df = df.with_columns(pl.col(col_name).cast(pl.Float64))
-    return df.to_dicts()
+            cast_exprs.append(pl.col(col_name).cast(pl.Utf8))
+        elif dtype.base_type() == pl.Duration:
+            cast_exprs.append(pl.col(col_name).dt.total_milliseconds())
+        elif dtype.base_type() == pl.Decimal:
+            cast_exprs.append(pl.col(col_name).cast(pl.Float64))
+    if cast_exprs:
+        lf = lf.with_columns(cast_exprs)
+    if isinstance(lf, pl.LazyFrame):
+        return lf.collect(engine="streaming").to_dicts()
+    elif isinstance(lf, pl.DataFrame):
+        return lf.to_dicts()

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "gw-polars"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Native Polars computation engine for Graphic Walker — translates GW workflow payloads directly to Polars operations"
 readme = "README.md"
 license = "MIT"
@@ -23,15 +23,65 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Visualization",
+    "Typing :: Typed",
 ]
 dependencies = [
-    "polars>=0.20.0",
+    "polars>=1.0.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Edwardvaneechoud/polars-gw"
+Repository = "https://github.com/Edwardvaneechoud/polars-gw"
+Issues = "https://github.com/Edwardvaneechoud/polars-gw/issues"
+
 [project.optional-dependencies]
+viz = [
+    "fastapi>=0.110.0",
+    "uvicorn>=0.29.0",
+    "pydantic>=2.0.0",
+]
+
+[dependency-groups]
 dev = [
     "pytest>=7.0",
     "ruff>=0.4.0",
+]
+example = [
+    "fastapi>=0.110.0",
+    "uvicorn>=0.29.0",
+    "pydantic>=2.0.0",
+]
+
+[tool.hatch.version]
+path = "gw_polars/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["gw_polars"]
+
+# The bundled JS/CSS assets under gw_polars/viz_assets/ are required by the
+# optional [viz] extra.  Non-Python files need to be listed explicitly so
+# hatchling includes them in both sdist and wheel.
+[tool.hatch.build.targets.wheel.force-include]
+"gw_polars/viz_assets/graphic-walker.js" = "gw_polars/viz_assets/graphic-walker.js"
+"gw_polars/viz_assets/graphic-walker.css" = "gw_polars/viz_assets/graphic-walker.css"
+"gw_polars/viz_assets/versions.json" = "gw_polars/viz_assets/versions.json"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "gw_polars",
+    "tests",
+    "example",
+    "js/package.json",
+    "js/package-lock.json",
+    "js/build.mjs",
+    "js/entry.jsx",
+    "js/entry.css",
+    "js/tailwind.config.cjs",
+    "js/postcss.config.cjs",
+    "js/README.md",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
 ]
 
 [tool.ruff]
