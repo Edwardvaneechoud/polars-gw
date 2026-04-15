@@ -24,6 +24,7 @@ import threading
 import time
 import webbrowser
 from dataclasses import dataclass, field
+from importlib import resources
 from pathlib import Path
 from typing import Any
 
@@ -62,21 +63,20 @@ except ImportError as _exc:  # pragma: no cover - exercised only without extras 
     _VIZ_IMPORT_ERROR = _exc
 
 
+_ASSETS_PACKAGE = "polars_gw.viz_assets"
+
+
 def _assets_dir() -> str:
-    """Return an absolute filesystem path to the bundled viz assets.
-
-    Assets are shipped in the separate ``polars-gw-viz`` package (installed
-    automatically by ``pip install 'polars-gw[viz]'``).
-    """
+    """Return an absolute filesystem path to the bundled viz assets."""
     try:
-        from polars_gw_viz import assets_dir
-
-        return assets_dir()
-    except ModuleNotFoundError as exc:
+        path = resources.files(_ASSETS_PACKAGE)
+    except ModuleNotFoundError as exc:  # pragma: no cover - misbuilt wheel
         raise RuntimeError(
-            "polars-gw viz assets not found. "
-            "Install with: pip install 'polars-gw[viz]'"
+            "polars-gw viz bundle is missing — did you `pip install` from a "
+            "source checkout without building? Run `npm install && npm run "
+            "build` inside `js/`, or reinstall from a published wheel."
         ) from exc
+    return str(path)
 
 
 _HTML_TEMPLATE = """<!DOCTYPE html>

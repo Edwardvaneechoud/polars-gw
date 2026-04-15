@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..");
-const outDir = resolve(repoRoot, "viz_pkg", "polars_gw_viz");
+const outDir = resolve(repoRoot, "polars_gw", "viz_assets");
 const isWatch = process.argv.includes("--watch");
 
 await mkdir(outDir, { recursive: true });
