@@ -1,6 +1,6 @@
 import pytest
 
-from gw_polars.executor import clear_cache
+from polars_gw.executor import clear_cache
 
 
 @pytest.fixture(autouse=True)

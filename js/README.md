@@ -2,7 +2,7 @@
 
 Builds the `@kanaries/graphic-walker` UI + React into a single
 self-contained JS/CSS pair that ships inside the `polars-gw` wheel
-under `gw_polars/viz_assets/`.
+under `polars_gw/viz_assets/`.
 
 End users **do not need Node** — they install `polars-gw[viz]` and the
 pre-built assets come along.  This directory is only for maintainers
@@ -23,9 +23,9 @@ npm run build         # minified, no source maps, mode=production
 
 Outputs committed to the repo:
 
-- `gw_polars/viz_assets/graphic-walker.js`   (minified IIFE, ~4.4 MB)
-- `gw_polars/viz_assets/graphic-walker.css`  (~57 KB)
-- `gw_polars/viz_assets/versions.json`       (pinned versions + build date + mode)
+- `polars_gw/viz_assets/graphic-walker.js`   (minified IIFE, ~4.4 MB)
+- `polars_gw/viz_assets/graphic-walker.css`  (~57 KB)
+- `polars_gw/viz_assets/versions.json`       (pinned versions + build date + mode)
 
 ## Dev / watch mode
 
@@ -43,7 +43,7 @@ Pair it with the Python server in another shell:
 uv run python example/walk_demo.py
 ```
 
-The Python server reads `gw_polars/viz_assets/` on every page load,
+The Python server reads `polars_gw/viz_assets/` on every page load,
 so refreshing the browser tab picks up the latest watch-mode build.
 Devtools will show real source positions (entry.jsx, GW src files).
 
@@ -56,7 +56,7 @@ as a marker.  Always finish with `npm run build` before committing.
 2. `rm -rf node_modules package-lock.json && npm install`
 3. `npm run build`
 4. Sanity-check in the browser (`uv run python example/walk_demo.py`).
-5. `git add gw_polars/viz_assets js/package.json js/package-lock.json`
+5. `git add polars_gw/viz_assets js/package.json js/package-lock.json`
 
 ## Why .npmrc has `legacy-peer-deps=true`
 

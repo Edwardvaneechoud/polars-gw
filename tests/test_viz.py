@@ -1,4 +1,4 @@
-"""Tests for gw_polars.viz — skipped entirely if the viz extras are absent."""
+"""Tests for polars_gw.viz — skipped entirely if the viz extras are absent."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ pytest.importorskip("fastapi")
 pytest.importorskip("uvicorn")
 
 
-from gw_polars import walk  # noqa: E402
+from polars_gw import walk  # noqa: E402
 
 
 def _wait_until_up(url: str, timeout: float = 5.0) -> None:
@@ -122,7 +122,7 @@ class TestWalk:
 
 def test_walk_without_viz_extras_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """Simulate the extras missing: _VIZ_IMPORT_ERROR set → walk() raises."""
-    from gw_polars import viz
+    from polars_gw import viz
 
     monkeypatch.setattr(viz, "_VIZ_IMPORT_ERROR", ImportError("No module named 'fastapi'"))
     with pytest.raises(ImportError, match=r"polars-gw\[viz\]"):
@@ -137,7 +137,7 @@ class TestLogging:
         handle = walk(df, open_browser=False)
         try:
             _wait_until_up(handle.url)
-            with caplog.at_level("INFO", logger="gw_polars"):
+            with caplog.at_level("INFO", logger="polars_gw"):
                 _post(f"{handle.url}/api/compute", b'{"workflow":[]}')
             messages = [r.getMessage() for r in caplog.records]
             assert any("compute:" in m and "row(s)" in m and "ms" in m for m in messages), messages
@@ -150,7 +150,7 @@ class TestLogging:
         handle = walk(df, open_browser=False, max_rows=10)
         try:
             _wait_until_up(handle.url)
-            with caplog.at_level("INFO", logger="gw_polars"):
+            with caplog.at_level("INFO", logger="polars_gw"):
                 _post(f"{handle.url}/api/compute", b'{"workflow":[]}')
             messages = [r.getMessage() for r in caplog.records]
             assert any("[CAPPED]" in m for m in messages), messages

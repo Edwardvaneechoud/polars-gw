@@ -39,7 +39,7 @@ export default function App() {
         <p>
           Start the backend first:
           <code style={{ display: "block", margin: "12px 0", padding: 8, background: "#f5f5f5" }}>
-            cd gw_polars/example && python server.py
+            cd polars_gw/example && python server.py
           </code>
         </p>
       </div>

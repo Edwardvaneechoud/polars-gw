@@ -1,8 +1,8 @@
 """polars-gw: Native Polars computation engine for Graphic Walker."""
 
-from gw_polars.executor import DEFAULT_MAX_ROWS, execute_workflow
-from gw_polars.fields import get_fields
-from gw_polars.types import (
+from polars_gw.executor import DEFAULT_MAX_ROWS, execute_workflow
+from polars_gw.fields import get_fields
+from polars_gw.types import (
     Aggregator,
     AnalyticType,
     IDataQueryPayload,
@@ -12,7 +12,6 @@ from gw_polars.types import (
     ViewQuery,
     WorkflowStep,
 )
-from gw_polars.viz import walk
 
 __all__ = [
     "Aggregator",
@@ -28,4 +27,12 @@ __all__ = [
     "get_fields",
     "walk",
 ]
-__version__ = "0.1.0"
+__version__ = "0.1.1"
+
+
+def __getattr__(name: str):
+    if name == "walk":
+        from polars_gw.viz import walk
+
+        return walk
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

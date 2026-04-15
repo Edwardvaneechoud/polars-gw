@@ -1,10 +1,10 @@
-"""Tests for gw_polars.executor — GW workflow → Polars translation."""
+"""Tests for polars_gw.executor — GW workflow → Polars translation."""
 
 import datetime
 
 import polars as pl
 
-from gw_polars.executor import execute_workflow
+from polars_gw.executor import execute_workflow
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -847,7 +847,7 @@ class TestMaxRows:
 
     def test_default_cap_applied(self):
         """Default max_rows (1M) is applied — result is capped, not unlimited."""
-        from gw_polars.executor import DEFAULT_MAX_ROWS
+        from polars_gw.executor import DEFAULT_MAX_ROWS
 
         assert DEFAULT_MAX_ROWS == 1_000_000
         # Just verify the parameter default works (don't allocate 1M+ rows)

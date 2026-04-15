@@ -2,12 +2,12 @@
   "name": "gw-polars-viz-build",
   "private": true,
   "version": "0.0.0",
-  "description": "Build script that bundles Graphic Walker + React into gw_polars/viz_assets/ so the Python viz extra ships a self-contained browser UI.",
+  "description": "Build script that bundles Graphic Walker + React into polars_gw/viz_assets/ so the Python viz extra ships a self-contained browser UI.",
   "type": "module",
   "scripts": {
     "build": "node build.mjs",
     "dev": "node build.mjs --watch",
-    "clean": "node -e \"require('node:fs').rmSync('../gw_polars/viz_assets/graphic-walker.js',{force:true});require('node:fs').rmSync('../gw_polars/viz_assets/graphic-walker.css',{force:true})\""
+    "clean": "node -e \"require('node:fs').rmSync('../polars_gw/viz_assets/graphic-walker.js',{force:true});require('node:fs').rmSync('../polars_gw/viz_assets/graphic-walker.css',{force:true})\""
   },
   "dependencies": {
     "@kanaries/graphic-walker": "0.5.0",

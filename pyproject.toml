@@ -36,6 +36,7 @@ Issues = "https://github.com/Edwardvaneechoud/polars-gw/issues"
 
 [project.optional-dependencies]
 viz = [
+    "polars-gw-viz>=0.1.1",
     "fastapi>=0.110.0",
     "uvicorn>=0.29.0",
     "pydantic>=2.0.0",
@@ -53,22 +54,14 @@ example = [
 ]
 
 [tool.hatch.version]
-path = "gw_polars/__init__.py"
+path = "polars_gw/__init__.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["gw_polars"]
-
-# The bundled JS/CSS assets under gw_polars/viz_assets/ are required by the
-# optional [viz] extra.  Non-Python files need to be listed explicitly so
-# hatchling includes them in both sdist and wheel.
-[tool.hatch.build.targets.wheel.force-include]
-"gw_polars/viz_assets/graphic-walker.js" = "gw_polars/viz_assets/graphic-walker.js"
-"gw_polars/viz_assets/graphic-walker.css" = "gw_polars/viz_assets/graphic-walker.css"
-"gw_polars/viz_assets/versions.json" = "gw_polars/viz_assets/versions.json"
+packages = ["polars_gw"]
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "gw_polars",
+    "polars_gw",
     "tests",
     "example",
     "js/package.json",
@@ -83,6 +76,9 @@ include = [
     "LICENSE",
     "pyproject.toml",
 ]
+
+[tool.uv.sources]
+polars-gw-viz = { path = "viz_pkg", editable = true }
 
 [tool.ruff]
 line-length = 120

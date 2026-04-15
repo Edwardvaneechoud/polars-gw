@@ -1,4 +1,4 @@
-"""Minimal demo of gw_polars.walk() — requires ``polars-gw[viz]`` extras.
+"""Minimal demo of polars_gw.walk() — requires ``polars-gw[viz]`` extras.
 
 Run::
 
@@ -9,7 +9,7 @@ import logging
 
 import polars as pl
 
-from gw_polars import walk
+from polars_gw import walk
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-7s %(name)s: %(message)s")
 

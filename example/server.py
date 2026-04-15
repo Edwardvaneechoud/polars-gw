@@ -4,7 +4,7 @@ Minimal FastAPI server to test polars-gw with a real Graphic Walker frontend.
 Usage:
     # Terminal 1: start the backend
     pip install fastapi uvicorn
-    cd gw_polars/example
+    cd polars_gw/example
 
     python server.py                          # uses sample data (1000 rows)
     python server.py /path/to/data.csv        # load a CSV file
@@ -12,7 +12,7 @@ Usage:
     python server.py /path/to/data.json       # load a JSON file
 
     # Terminal 2: start the frontend
-    cd gw_polars/example
+    cd polars_gw/example
     npm install
     npm run dev
 
@@ -29,9 +29,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from gw_polars import execute_workflow, get_fields
+from polars_gw import execute_workflow, get_fields
 
-logger = logging.getLogger("gw_polars.example")
+logger = logging.getLogger("polars_gw.example")
 
 
 def load_data() -> pl.DataFrame:

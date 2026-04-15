@@ -7,7 +7,7 @@ from typing import Any
 
 import polars as pl
 
-from gw_polars.types import AnalyticType, IMutField, SemanticType
+from polars_gw.types import AnalyticType, IMutField, SemanticType
 
 logger = logging.getLogger(__name__)
 

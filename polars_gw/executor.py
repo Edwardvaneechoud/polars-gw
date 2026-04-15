@@ -11,7 +11,7 @@ from typing import Any
 
 import polars as pl
 
-from gw_polars.types import (
+from polars_gw.types import (
     AggQuery,
     BinQuery,
     FieldTransform,
@@ -28,7 +28,7 @@ from gw_polars.types import (
 logger = logging.getLogger(__name__)
 
 # Per-request ID so concurrent execute_workflow calls can be disentangled in the logs.
-_request_id: contextvars.ContextVar[str] = contextvars.ContextVar("gw_polars_request_id", default="")
+_request_id: contextvars.ContextVar[str] = contextvars.ContextVar("polars_gw_request_id", default="")
 
 
 def _log(level: int, msg: str, *args: Any) -> None:

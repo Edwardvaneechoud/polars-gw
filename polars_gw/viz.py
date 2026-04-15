@@ -7,7 +7,7 @@ Requires the ``viz`` extras::
 Usage::
 
     import polars as pl
-    from gw_polars import walk
+    from polars_gw import walk
 
     df = pl.read_parquet("sales.parquet")
     handle = walk(df)
@@ -24,14 +24,13 @@ import threading
 import time
 import webbrowser
 from dataclasses import dataclass, field
-from importlib import resources
 from pathlib import Path
 from typing import Any
 
 import polars as pl
 
-from gw_polars.executor import DEFAULT_MAX_ROWS, execute_workflow
-from gw_polars.fields import get_fields
+from polars_gw.executor import DEFAULT_MAX_ROWS, execute_workflow
+from polars_gw.fields import get_fields
 
 logger = logging.getLogger(__name__)
 
@@ -63,28 +62,21 @@ except ImportError as _exc:  # pragma: no cover - exercised only without extras 
     _VIZ_IMPORT_ERROR = _exc
 
 
-_ASSETS_PACKAGE = "gw_polars.viz_assets"
-
-
 def _assets_dir() -> str:
     """Return an absolute filesystem path to the bundled viz assets.
 
-    Works in both editable installs (reads straight from the repo) and
-    wheel installs (reads from site-packages).  Raises a clear error if
-    the bundle is missing — typically means the repo is checked out
-    without having run `npm run build` in `js/`.
+    Assets are shipped in the separate ``polars-gw-viz`` package (installed
+    automatically by ``pip install 'polars-gw[viz]'``).
     """
     try:
-        path = resources.files(_ASSETS_PACKAGE)
-    except ModuleNotFoundError as exc:  # pragma: no cover - misbuilt wheel
+        from polars_gw_viz import assets_dir
+
+        return assets_dir()
+    except ModuleNotFoundError as exc:
         raise RuntimeError(
-            "polars-gw viz bundle is missing — did you `pip install` from a "
-            "source checkout without building? Run `npm install && npm run "
-            "build` inside `js/`, or reinstall from a published wheel."
+            "polars-gw viz assets not found. "
+            "Install with: pip install 'polars-gw[viz]'"
         ) from exc
-    # importlib.resources returns a Traversable; MultiplexedPath/PosixPath
-    # both str() cleanly to a filesystem path for our use case.
-    return str(path)
 
 
 _HTML_TEMPLATE = """<!DOCTYPE html>
@@ -177,7 +169,7 @@ class WalkHandle:
 
 
 def _ensure_console_logging(level: str) -> None:
-    """Attach a stderr handler to the ``gw_polars`` logger if none exists.
+    """Attach a stderr handler to the ``polars_gw`` logger if none exists.
 
     Library code normally shouldn't add handlers, but ``walk()`` is an
     interactive entrypoint — without this, users running in the REPL or
@@ -188,7 +180,7 @@ def _ensure_console_logging(level: str) -> None:
     already configured a handler on the package logger or the root
     logger.  Idempotent: a sentinel attr makes repeated calls cheap.
     """
-    pkg_logger = logging.getLogger("gw_polars")
+    pkg_logger = logging.getLogger("polars_gw")
     pkg_logger.setLevel(level.upper())
 
     if getattr(pkg_logger, "_gwp_console_attached", False):
@@ -219,7 +211,7 @@ def walk(
 
     Starts a FastAPI server in a background daemon thread that serves the
     Graphic Walker UI and wires its ``computation`` callback to
-    :func:`gw_polars.execute_workflow`.
+    :func:`polars_gw.execute_workflow`.
 
     Args:
         df: The DataFrame (or LazyFrame) to explore.  LazyFrames are
@@ -233,11 +225,11 @@ def walk(
         open_browser: Whether to open the URL in the default browser.
         max_rows: Hard row cap applied to every compute response — see
             :func:`execute_workflow`.  Defaults to
-            :data:`gw_polars.DEFAULT_MAX_ROWS` (1 000 000).  When the cap
+            :data:`polars_gw.DEFAULT_MAX_ROWS` (1 000 000).  When the cap
             is hit, a WARNING is emitted and Graphic Walker shows its
             "Data Limit Reached" toast in the UI.  Pass ``None`` to
             disable the cap entirely.
-        log_level: Python logging level for the ``gw_polars`` logger
+        log_level: Python logging level for the ``polars_gw`` logger
             and for uvicorn's request logs.  Defaults to ``"info"`` so
             you see compute timings + cap warnings in the REPL.  Set
             to ``"warning"`` for less noise, ``"debug"`` for more.

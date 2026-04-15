@@ -30,7 +30,7 @@ cd js && npm install && npm run build
 
 ## Architecture
 
-### Core Package (`gw_polars/`)
+### Core Package (`polars_gw/`)
 
 - **`executor.py`** — Central translation engine. Converts GW workflow payloads into Polars lazy query plans. Supports filters (range, temporal, one-of, not-in, regexp), aggregations, fold (unpivot), bin, raw field selection, sort, and transforms (bin, log, dateTime drill/feature, arbitrary SQL via `pl.sql_expr()`). Builds the full query lazily, then collects once at the end.
 
@@ -42,7 +42,7 @@ cd js && npm install && npm run build
 
 ### JS Bundle (`js/`)
 
-Pre-built Graphic Walker + React IIFE bundle shipped inside the wheel so users don't need Node. Built with esbuild + tailwindcss. React 19.2.0 is pinned exactly (GW 0.5.0 runtime check). Output goes to `gw_polars/viz_assets/`.
+Pre-built Graphic Walker + React IIFE bundle shipped inside the wheel so users don't need Node. Built with esbuild + tailwindcss. React 19.2.0 is pinned exactly (GW 0.5.0 runtime check). Output goes to `polars_gw/viz_assets/`.
 
 ### Key Patterns
 

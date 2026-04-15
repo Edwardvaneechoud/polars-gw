@@ -1,11 +1,11 @@
-"""Tests for gw_polars.fields — Polars schema to GW IMutField conversion."""
+"""Tests for polars_gw.fields — Polars schema to GW IMutField conversion."""
 
 import datetime
 from decimal import Decimal
 
 import polars as pl
 
-from gw_polars.fields import get_fields
+from polars_gw.fields import get_fields
 
 
 class TestGetFields:
@@ -159,6 +159,6 @@ class TestFieldOverrides:
 
     def test_unknown_override_warns(self, caplog):
         df = pl.DataFrame({"x": [1]})
-        with caplog.at_level("WARNING", logger="gw_polars.fields"):
+        with caplog.at_level("WARNING", logger="polars_gw.fields"):
             get_fields(df, field_overrides={"nope": {"analyticType": "measure"}})
         assert any("nope" in rec.message for rec in caplog.records)

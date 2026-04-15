@@ -1,5 +1,5 @@
 // Bundles Graphic Walker + React + our entry point into a single IIFE
-// JS file and copies the matching CSS into gw_polars/viz_assets/.
+// JS file and copies the matching CSS into polars_gw/viz_assets/.
 //
 // Modes:
 //   node build.mjs            # one-shot production build (minified)
@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..");
-const outDir = resolve(repoRoot, "gw_polars", "viz_assets");
+const outDir = resolve(repoRoot, "viz_pkg", "polars_gw_viz");
 const isWatch = process.argv.includes("--watch");
 
 await mkdir(outDir, { recursive: true });

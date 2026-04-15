@@ -150,6 +150,7 @@ dependencies = [
 [package.optional-dependencies]
 viz = [
     { name = "fastapi" },
+    { name = "polars-gw-viz" },
     { name = "pydantic" },
     { name = "uvicorn" },
 ]
@@ -169,6 +170,7 @@ example = [
 requires-dist = [
     { name = "fastapi", marker = "extra == 'viz'", specifier = ">=0.110.0" },
     { name = "polars", specifier = ">=1.0.0" },
+    { name = "polars-gw-viz", marker = "extra == 'viz'", editable = "viz_pkg" },
     { name = "pydantic", marker = "extra == 'viz'", specifier = ">=2.0.0" },
     { name = "uvicorn", marker = "extra == 'viz'", specifier = ">=0.29.0" },
 ]
@@ -184,6 +186,11 @@ example = [
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "uvicorn", specifier = ">=0.29.0" },
 ]
+
+[[package]]
+name = "polars-gw-viz"
+version = "0.1.1"
+source = { editable = "viz_pkg" }
 
 [[package]]
 name = "polars-runtime-32"

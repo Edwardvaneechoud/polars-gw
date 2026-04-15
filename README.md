@@ -19,7 +19,7 @@ DataFrame in one line.
 
 ```python
 import polars as pl
-from gw_polars import walk
+from polars_gw import walk
 
 df = pl.read_parquet("sales.parquet")
 handle = walk(df)          # opens http://127.0.0.1:<free-port> in your browser
@@ -58,9 +58,9 @@ By default `walk()` prints one line per compute call so you can see
 what GW is asking the backend for:
 
 ```
-13:42:11  INFO    gw_polars.viz: Graphic Walker running on http://127.0.0.1:54221 — 12 000 000 rows x 19 cols, max_rows=1000000
-13:42:18  INFO    gw_polars.viz: compute: 2 step(s) → 847 row(s) in 142.3 ms
-13:42:24  INFO    gw_polars.viz: compute: 1 step(s) → 1000000 row(s) in 1284.7 ms [CAPPED]
+13:42:11  INFO    polars_gw.viz: Graphic Walker running on http://127.0.0.1:54221 — 12 000 000 rows x 19 cols, max_rows=1000000
+13:42:18  INFO    polars_gw.viz: compute: 2 step(s) → 847 row(s) in 142.3 ms
+13:42:24  INFO    polars_gw.viz: compute: 1 step(s) → 1000000 row(s) in 1284.7 ms [CAPPED]
 ```
 
 `[CAPPED]` means the result hit `max_rows` and was truncated — Graphic
@@ -84,7 +84,7 @@ it only attaches a console handler when nothing else owns logging.
 
 ```python
 import polars as pl
-from gw_polars import execute_workflow, get_fields
+from polars_gw import execute_workflow, get_fields
 
 df = pl.read_csv("data.csv")
 
@@ -177,7 +177,7 @@ UX surface area.
 ### Use PyGWalker when
 
 - You want the **Jupyter inline widget** — PyGWalker renders the UI
-  *inside* a notebook cell via anywidget.  `gw_polars.walk()` pops a
+  *inside* a notebook cell via anywidget.  `polars_gw.walk()` pops a
   browser tab.
 - You need first-party **framework integrations** (Streamlit, Gradio,
   Dash).  PyGWalker has these; polars-gw does not.
@@ -221,7 +221,7 @@ uv run ruff check .
 ### Bundling the viz assets
 
 The `walk()` UI ships a pre-built JS/CSS bundle under
-`gw_polars/viz_assets/` (committed to the repo) so end users don't need
+`polars_gw/viz_assets/` (committed to the repo) so end users don't need
 Node to `pip install polars-gw[viz]`.
 
 Maintainers rebuild when bumping Graphic Walker:
