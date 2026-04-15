@@ -31,6 +31,27 @@ handle.stop()
 the Graphic Walker UI **bundled inside the wheel** (no CDN, no network
 required), and wires its computation callback to `execute_workflow`.
 
+### Export / Import chart specs
+
+Charts you build in the UI can be saved and restored across sessions:
+
+```python
+# Export the current charts to a JSON file
+handle.export("my_charts.json")
+
+# Or just grab the spec as a Python list
+spec = handle.export()
+```
+
+Next time, pass the file back to `walk()` to restore exactly where you left off:
+
+```python
+handle = walk(df, spec_file="my_charts.json")
+```
+
+The spec file is a plain JSON array of Graphic Walker `IChart` objects — safe
+to version-control or share with collaborators.
+
 ### Logs
 
 By default `walk()` prints one line per compute call so you can see
@@ -110,7 +131,8 @@ results = execute_workflow(df, payload)
 
 | Polars Type | Semantic Type | Analytic Type |
 |-------------|---------------|---------------|
-| Int*, UInt*, Float*, Decimal | quantitative | measure |
+| Float*, Decimal | quantitative | measure |
+| Int*, UInt* | quantitative | dimension |
 | Date, Datetime, Time, Duration | temporal | dimension |
 | Utf8, Categorical, Boolean, etc. | nominal | dimension |
 
