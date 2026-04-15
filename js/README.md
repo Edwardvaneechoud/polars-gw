@@ -1,10 +1,10 @@
 # js/ — viz bundle build
 
 Builds the `@kanaries/graphic-walker` UI + React into a single
-self-contained JS/CSS pair that ships inside the `gw-polars` wheel
+self-contained JS/CSS pair that ships inside the `polars-gw` wheel
 under `gw_polars/viz_assets/`.
 
-End users **do not need Node** — they install `gw-polars[viz]` and the
+End users **do not need Node** — they install `polars-gw[viz]` and the
 pre-built assets come along.  This directory is only for maintainers
 who bump Graphic Walker.
 

@@ -1,4 +1,4 @@
-"""gw-polars: Native Polars computation engine for Graphic Walker."""
+"""polars-gw: Native Polars computation engine for Graphic Walker."""
 
 from gw_polars.executor import DEFAULT_MAX_ROWS, execute_workflow
 from gw_polars.fields import get_fields

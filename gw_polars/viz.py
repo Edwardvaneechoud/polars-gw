@@ -2,7 +2,7 @@
 
 Requires the ``viz`` extras::
 
-    pip install 'gw-polars[viz]'
+    pip install 'polars-gw[viz]'
 
 Usage::
 
@@ -78,7 +78,7 @@ def _assets_dir() -> str:
         path = resources.files(_ASSETS_PACKAGE)
     except ModuleNotFoundError as exc:  # pragma: no cover - misbuilt wheel
         raise RuntimeError(
-            "gw-polars viz bundle is missing — did you `pip install` from a "
+            "polars-gw viz bundle is missing — did you `pip install` from a "
             "source checkout without building? Run `npm install && npm run "
             "build` inside `js/`, or reinstall from a published wheel."
         ) from exc
@@ -91,7 +91,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Graphic Walker — gw-polars</title>
+  <title>Graphic Walker — polars-gw</title>
   <link rel="stylesheet" href="/static/graphic-walker.css">
   <style>
     html, body, #root { margin: 0; padding: 0; height: 100%; width: 100%; }
@@ -133,7 +133,7 @@ def _require_viz() -> None:
     if _VIZ_IMPORT_ERROR is not None:
         raise ImportError(
             "The walk() feature requires extra dependencies. "
-            "Install with: pip install 'gw-polars[viz]'"
+            "Install with: pip install 'polars-gw[viz]'"
         ) from _VIZ_IMPORT_ERROR
 
 
@@ -326,7 +326,7 @@ def walk(
     bind_port = _free_port() if port is None else port
     config = uvicorn.Config(app, host=host, port=bind_port, log_level=log_level.lower(), timeout_keep_alive=60)
     server = uvicorn.Server(config)
-    thread = threading.Thread(target=server.run, daemon=True, name="gw-polars-viz")
+    thread = threading.Thread(target=server.run, daemon=True, name="polars-gw-viz")
     thread.start()
 
     deadline = time.monotonic() + 5.0

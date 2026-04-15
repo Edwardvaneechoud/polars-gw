@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**gw-polars** is a native Polars computation engine for [Graphic Walker](https://github.com/Kanaries/graphic-walker). It translates Graphic Walker `IDataQueryPayload` workflow steps directly into Polars expressions, bypassing the DuckDB/SQL path used by PyGWalker.
+**polars-gw** is a native Polars computation engine for [Graphic Walker](https://github.com/Kanaries/graphic-walker). It translates Graphic Walker `IDataQueryPayload` workflow steps directly into Polars expressions, bypassing the DuckDB/SQL path used by PyGWalker.
 
 ## Common Commands
 

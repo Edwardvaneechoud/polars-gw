@@ -1,4 +1,4 @@
-# gw-polars
+# polars-gw
 
 Native Polars computation engine for [Graphic Walker](https://github.com/Kanaries/graphic-walker).
 
@@ -7,8 +7,8 @@ Translates Graphic Walker `IDataQueryPayload` workflow steps directly into Polar
 ## Installation
 
 ```bash
-pip install gw-polars              # core translator only
-pip install 'gw-polars[viz]'       # core + built-in walk() UI
+pip install polars-gw              # core translator only
+pip install 'polars-gw[viz]'       # core + built-in walk() UI
 ```
 
 The core install only pulls in `polars`.  The `[viz]` extra adds FastAPI,
@@ -144,7 +144,7 @@ PyGWalker (and panel-graphic-walker) always route through DuckDB — even for Po
 DataFrame → DuckDB → SQL → execute → dicts
 ```
 
-gw-polars translates directly to Polars operations:
+polars-gw translates directly to Polars operations:
 
 ```
 DataFrame → Polars expressions → execute → dicts
@@ -152,13 +152,13 @@ DataFrame → Polars expressions → execute → dicts
 
 No DuckDB dependency. No SQL intermediate. Just Polars.
 
-## gw-polars vs PyGWalker — which should you use?
+## polars-gw vs PyGWalker — which should you use?
 
-Different tools, different jobs.  `gw-polars` is a focused compute engine
+Different tools, different jobs.  `polars-gw` is a focused compute engine
 + a standalone browser UI.  PyGWalker is a broader product with richer
 UX surface area.
 
-### Use `gw-polars` when
+### Use `polars-gw` when
 
 - You're already in the **Polars ecosystem** (e.g. LazyFrames, streaming,
   or tools like [Flowfile](https://github.com/edwardvaneechoud/Flowfile))
@@ -180,7 +180,7 @@ UX surface area.
   *inside* a notebook cell via anywidget.  `gw_polars.walk()` pops a
   browser tab.
 - You need first-party **framework integrations** (Streamlit, Gradio,
-  Dash).  PyGWalker has these; gw-polars does not.
+  Dash).  PyGWalker has these; polars-gw does not.
 - You rely on **chart persistence** — saving/loading chart specs,
   exporting HTML/PNG, `vis_spec` round-tripping.
 - You want **heterogeneous input support** (pandas + Polars + parquet +
@@ -191,7 +191,7 @@ UX surface area.
 
 ### At a glance
 
-| Concern | gw-polars | PyGWalker |
+| Concern | polars-gw | PyGWalker |
 |---|---|---|
 | Backend | Polars expressions | DuckDB SQL |
 | Install weight | Lean (polars only) | DuckDB + heavier deps |
@@ -205,7 +205,7 @@ UX surface area.
 | Heterogeneous inputs (pandas/parquet/SQL) | Polars-only | ✅ |
 
 Short version: if you're all-in on Polars and want the fast, native path,
-use `gw-polars`.  If you want inline-notebook, Streamlit, or chart
+use `polars-gw`.  If you want inline-notebook, Streamlit, or chart
 persistence out of the box, use PyGWalker.
 
 ## Development
@@ -222,7 +222,7 @@ uv run ruff check .
 
 The `walk()` UI ships a pre-built JS/CSS bundle under
 `gw_polars/viz_assets/` (committed to the repo) so end users don't need
-Node to `pip install gw-polars[viz]`.
+Node to `pip install polars-gw[viz]`.
 
 Maintainers rebuild when bumping Graphic Walker:
 

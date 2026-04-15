@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.10"
 
 [[package]]
@@ -84,51 +84,6 @@ wheels = [
 ]
 
 [[package]]
-name = "gw-polars"
-source = { editable = "." }
-dependencies = [
-    { name = "polars" },
-]
-
-[package.optional-dependencies]
-viz = [
-    { name = "fastapi" },
-    { name = "pydantic" },
-    { name = "uvicorn" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "ruff" },
-]
-example = [
-    { name = "fastapi" },
-    { name = "pydantic" },
-    { name = "uvicorn" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "fastapi", marker = "extra == 'viz'", specifier = ">=0.110.0" },
-    { name = "polars", specifier = ">=1.0.0" },
-    { name = "pydantic", marker = "extra == 'viz'", specifier = ">=2.0.0" },
-    { name = "uvicorn", marker = "extra == 'viz'", specifier = ">=0.29.0" },
-]
-provides-extras = ["viz"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=7.0" },
-    { name = "ruff", specifier = ">=0.4.0" },
-]
-example = [
-    { name = "fastapi", specifier = ">=0.110.0" },
-    { name = "pydantic", specifier = ">=2.0.0" },
-    { name = "uvicorn", specifier = ">=0.29.0" },
-]
-
-[[package]]
 name = "h11"
 version = "0.16.0"
 source = { registry = "https://pypi.org/simple" }
@@ -183,6 +138,51 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/93/ab/f19e592fce9e000da49c96bf35e77cef67f9cb4b040bfa538a2764c0263e/polars-1.39.3.tar.gz", hash = "sha256:2e016c7f3e8d14fa777ef86fe0477cec6c67023a20ba4c94d6e8431eefe4a63c", size = 728987, upload-time = "2026-03-20T11:16:24.836Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b4/db/08f4ca10c5018813e7e0b59e4472302328b3d2ab1512f5a2157a814540e0/polars-1.39.3-py3-none-any.whl", hash = "sha256:c2b955ccc0a08a2bc9259785decf3d5c007b489b523bf2390cf21cec2bb82a56", size = 823985, upload-time = "2026-03-20T11:14:23.619Z" },
+]
+
+[[package]]
+name = "polars-gw"
+source = { editable = "." }
+dependencies = [
+    { name = "polars" },
+]
+
+[package.optional-dependencies]
+viz = [
+    { name = "fastapi" },
+    { name = "pydantic" },
+    { name = "uvicorn" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+example = [
+    { name = "fastapi" },
+    { name = "pydantic" },
+    { name = "uvicorn" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastapi", marker = "extra == 'viz'", specifier = ">=0.110.0" },
+    { name = "polars", specifier = ">=1.0.0" },
+    { name = "pydantic", marker = "extra == 'viz'", specifier = ">=2.0.0" },
+    { name = "uvicorn", marker = "extra == 'viz'", specifier = ">=0.29.0" },
+]
+provides-extras = ["viz"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=7.0" },
+    { name = "ruff", specifier = ">=0.4.0" },
+]
+example = [
+    { name = "fastapi", specifier = ">=0.110.0" },
+    { name = "pydantic", specifier = ">=2.0.0" },
+    { name = "uvicorn", specifier = ">=0.29.0" },
 ]
 
 [[package]]

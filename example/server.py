@@ -1,5 +1,5 @@
 """
-Minimal FastAPI server to test gw-polars with a real Graphic Walker frontend.
+Minimal FastAPI server to test polars-gw with a real Graphic Walker frontend.
 
 Usage:
     # Terminal 1: start the backend

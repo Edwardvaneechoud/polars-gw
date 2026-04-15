@@ -125,7 +125,7 @@ def test_walk_without_viz_extras_raises(monkeypatch: pytest.MonkeyPatch) -> None
     from gw_polars import viz
 
     monkeypatch.setattr(viz, "_VIZ_IMPORT_ERROR", ImportError("No module named 'fastapi'"))
-    with pytest.raises(ImportError, match=r"gw-polars\[viz\]"):
+    with pytest.raises(ImportError, match=r"polars-gw\[viz\]"):
         viz.walk(pl.DataFrame({"a": [1]}))
 
 

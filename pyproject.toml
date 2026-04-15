@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "gw-polars"
+name = "polars-gw"
 dynamic = ["version"]
 description = "Native Polars computation engine for Graphic Walker — translates GW workflow payloads directly to Polars operations"
 readme = "README.md"

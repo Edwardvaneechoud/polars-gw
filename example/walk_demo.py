@@ -1,4 +1,4 @@
-"""Minimal demo of gw_polars.walk() — requires ``gw-polars[viz]`` extras.
+"""Minimal demo of gw_polars.walk() — requires ``polars-gw[viz]`` extras.
 
 Run::
 
