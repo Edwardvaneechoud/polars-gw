@@ -189,7 +189,7 @@ example = [
 
 [[package]]
 name = "polars-gw-viz"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "viz_pkg" }
 
 [[package]]
