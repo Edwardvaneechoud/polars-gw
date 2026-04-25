@@ -1,3 +1,12 @@
+# polars-gw v0.1.3 — Paired with Flowfile 0.9.3
+
+Companion release to Flowfile 0.9.3, which embeds polars-gw in its worker
+service to power the new "library of visualizations" feature on catalog
+tables. No API changes; the version bump keeps the Flowfile and polars-gw
+release lines aligned per the paired-bump policy.
+
+---
+
 # polars-gw v0.1.0 — Initial Release
 
 Native Polars computation engine for [Graphic Walker](https://github.com/Kanaries/graphic-walker). Translates GW workflow payloads directly into Polars expressions — no DuckDB, no SQL intermediate.
