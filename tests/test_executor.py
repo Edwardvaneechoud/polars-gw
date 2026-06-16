@@ -3,8 +3,24 @@
 import datetime
 
 import polars as pl
+import pytest
 
-from polars_gw.executor import execute_workflow
+from polars_gw.executor import clear_cache, execute_workflow
+
+
+@pytest.fixture(autouse=True)
+def _isolate_executor_cache():
+    """Reset the module-level result cache around every test.
+
+    ``execute_workflow`` caches by ``id(df)`` + payload digest.  Transient
+    DataFrames built inline in different tests can be garbage-collected and
+    have their ``id()`` reused, so without isolation a later test issuing the
+    same payload could receive an earlier test's stale, cached rows.
+    """
+    clear_cache()
+    yield
+    clear_cache()
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -625,41 +641,32 @@ class TestTransform:
         A constant/single-row column has step == 0 (0/0 -> NaN); an all-null or
         empty column has no min/max.  Each collapses to a single bucket rather
         than blowing up the Int64 cast.
+
+        Each case uses a distinct output name so the per-``id(df)`` result cache
+        can't return one transient frame's rows for another's identical payload.
         """
+        def _bin(df, as_name):
+            return execute_workflow(
+                df,
+                {"workflow": [{"type": "transform", "transform": [
+                    {"key": as_name, "expression": {"op": "bin", "params": ["val"], "as": as_name, "num": 10}}
+                ]}]},
+            )
+
         # constant: step == 0, every row lands in the same [lo, hi] bucket.
-        result = execute_workflow(
-            pl.DataFrame({"val": [5, 5, 5]}),
-            {"workflow": [{"type": "transform", "transform": [
-                {"key": "q", "expression": {"op": "bin", "params": ["val"], "as": "q", "num": 10}}
-            ]}]},
-        )
-        assert all(r["q"] == [5.0, 5.0] for r in result)
+        result = _bin(pl.DataFrame({"val": [5, 5, 5]}), "bin_const")
+        assert all(r["bin_const"] == [5.0, 5.0] for r in result)
 
         # single row.
-        result = execute_workflow(
-            pl.DataFrame({"val": [7]}),
-            {"workflow": [{"type": "transform", "transform": [
-                {"key": "q", "expression": {"op": "bin", "params": ["val"], "as": "q", "num": 10}}
-            ]}]},
-        )
-        assert result == [{"val": 7, "q": [7.0, 7.0]}]
+        result = _bin(pl.DataFrame({"val": [7]}), "bin_single")
+        assert result == [{"val": 7, "bin_single": [7.0, 7.0]}]
 
         # all-null: bounds are null, single (null) bucket, no raise.
-        result = execute_workflow(
-            pl.DataFrame({"val": [None, None]}, schema={"val": pl.Float64}),
-            {"workflow": [{"type": "transform", "transform": [
-                {"key": "q", "expression": {"op": "bin", "params": ["val"], "as": "q", "num": 10}}
-            ]}]},
-        )
-        assert all(r["q"] == [None, None] for r in result)
+        result = _bin(pl.DataFrame({"val": [None, None]}, schema={"val": pl.Float64}), "bin_null")
+        assert all(r["bin_null"] == [None, None] for r in result)
 
         # empty frame: no rows, no raise.
-        result = execute_workflow(
-            pl.DataFrame({"val": []}, schema={"val": pl.Float64}),
-            {"workflow": [{"type": "transform", "transform": [
-                {"key": "q", "expression": {"op": "bin", "params": ["val"], "as": "q", "num": 10}}
-            ]}]},
-        )
+        result = _bin(pl.DataFrame({"val": []}, schema={"val": pl.Float64}), "bin_empty")
         assert result == []
 
     def test_bin_count_transform_degenerate(self):
@@ -667,41 +674,32 @@ class TestTransform:
 
         An empty column has group_size == 0 (0/0 -> NaN); constant/single-row/
         all-null columns collapse to the first (1-indexed) bucket.
+
+        Each case uses a distinct output name so the per-``id(df)`` result cache
+        can't return one transient frame's rows for another's identical payload.
         """
+        def _bin_count(df, as_name):
+            return execute_workflow(
+                df,
+                {"workflow": [{"type": "transform", "transform": [
+                    {"key": as_name, "expression": {"op": "binCount", "params": ["val"], "as": as_name, "num": 4}}
+                ]}]},
+            )
+
         # constant column → still 1-indexed buckets, no raise.
-        result = execute_workflow(
-            pl.DataFrame({"val": [5, 5, 5]}),
-            {"workflow": [{"type": "transform", "transform": [
-                {"key": "q", "expression": {"op": "binCount", "params": ["val"], "as": "q", "num": 4}}
-            ]}]},
-        )
-        assert all(r["q"] >= 1 for r in result)
+        result = _bin_count(pl.DataFrame({"val": [5, 5, 5]}), "bc_const")
+        assert all(r["bc_const"] >= 1 for r in result)
 
         # single row → bucket 1.
-        result = execute_workflow(
-            pl.DataFrame({"val": [7]}),
-            {"workflow": [{"type": "transform", "transform": [
-                {"key": "q", "expression": {"op": "binCount", "params": ["val"], "as": "q", "num": 4}}
-            ]}]},
-        )
-        assert result == [{"val": 7, "q": 1}]
+        result = _bin_count(pl.DataFrame({"val": [7]}), "bc_single")
+        assert result == [{"val": 7, "bc_single": 1}]
 
         # all-null → group_size == 0, every row collapses to bucket 1.
-        result = execute_workflow(
-            pl.DataFrame({"val": [None, None]}, schema={"val": pl.Float64}),
-            {"workflow": [{"type": "transform", "transform": [
-                {"key": "q", "expression": {"op": "binCount", "params": ["val"], "as": "q", "num": 4}}
-            ]}]},
-        )
-        assert all(r["q"] == 1 for r in result)
+        result = _bin_count(pl.DataFrame({"val": [None, None]}, schema={"val": pl.Float64}), "bc_null")
+        assert all(r["bc_null"] == 1 for r in result)
 
         # empty frame: no rows, no raise.
-        result = execute_workflow(
-            pl.DataFrame({"val": []}, schema={"val": pl.Float64}),
-            {"workflow": [{"type": "transform", "transform": [
-                {"key": "q", "expression": {"op": "binCount", "params": ["val"], "as": "q", "num": 4}}
-            ]}]},
-        )
+        result = _bin_count(pl.DataFrame({"val": []}, schema={"val": pl.Float64}), "bc_empty")
         assert result == []
 
     def test_log_transform(self):
