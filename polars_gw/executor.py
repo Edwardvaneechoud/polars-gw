@@ -366,11 +366,13 @@ def _apply_bin(lf: pl.LazyFrame | pl.DataFrame, query: BinQuery) -> pl.LazyFrame
     bin_by = query.get("binBy")
     new_col = query.get("newBinCol", f"{bin_by}_bin")
     bin_size = query.get("binSize", 10)
+    if not isinstance(bin_size, int|float) or bin_size <= 0:
+        bin_size = 10
     if not bin_by or bin_by not in lf.collect_schema():
         return lf
     col = pl.col(bin_by)
     return lf.with_columns(
-        ((col - col.min()) / bin_size).floor().cast(pl.Int64).alias(new_col)
+        ((col - col.min()) / bin_size).floor().cast(pl.Int64, strict=False).fill_null(0).alias(new_col)
     )
 
 
@@ -541,9 +543,12 @@ def _build_transform_expr(expression: TransformExpression, schema: pl.Schema) ->
             step = (col.max() - col_min) / num_bins
             # Clip so col.max() falls into the last bin rather than a phantom
             # bin N (mirrors `if (bIndex === binSize) bIndex = binSize - 1;`).
+            # strict=False so a degenerate column (constant/single-row → step==0
+            # → 0/0 == NaN in the eagerly-evaluated then-branch) yields null
+            # instead of raising; the when() still selects .otherwise(0).
             idx = (
                 pl.when(step > 0)
-                .then(((col - col_min) / step).floor().cast(pl.Int64).clip(0, num_bins - 1))
+                .then(((col - col_min) / step).floor().cast(pl.Int64, strict=False).clip(0, num_bins - 1))
                 .otherwise(0)
             )
             lower = (col_min + idx * step).cast(pl.Float64)
@@ -568,9 +573,12 @@ def _build_transform_expr(expression: TransformExpression, schema: pl.Schema) ->
             # matches the reference's stable sort.
             order_index = col.rank(method="ordinal") - 1  # 0-indexed
             group_size = col.count() / num_bins
+            # strict=False so an empty/degenerate column (group_size==0 → 0/0 ==
+            # NaN in the eagerly-evaluated then-branch) yields null instead of
+            # raising; the when() still selects .otherwise(1).
             return (
                 pl.when(group_size > 0)
-                .then((order_index / group_size).floor().cast(pl.Int64).clip(0, num_bins - 1) + 1)
+                .then((order_index / group_size).floor().cast(pl.Int64, strict=False).clip(0, num_bins - 1) + 1)
                 .otherwise(1)
             )
 

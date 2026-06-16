@@ -461,6 +461,58 @@ class TestBin:
         result = execute_workflow(df, payload)
         assert all(r["b"] == 0 for r in result)
 
+    def test_bin_single_row(self):
+        df = pl.DataFrame({"val": [7]})
+        payload = {
+            "workflow": [
+                {"type": "view", "query": [
+                    {"op": "bin", "binBy": "val", "newBinCol": "b", "binSize": 10}
+                ]}
+            ]
+        }
+        result = execute_workflow(df, payload)
+        assert result == [{"val": 7, "b": 0}]
+
+    def test_bin_all_null_column(self):
+        # An all-null numeric column has no min/max; the cast must not raise and
+        # every row collapses to bucket 0.
+        df = pl.DataFrame({"val": [None, None, None]}, schema={"val": pl.Float64})
+        payload = {
+            "workflow": [
+                {"type": "view", "query": [
+                    {"op": "bin", "binBy": "val", "newBinCol": "b", "binSize": 10}
+                ]}
+            ]
+        }
+        result = execute_workflow(df, payload)
+        assert all(r["b"] == 0 for r in result)
+
+    def test_bin_empty_frame(self):
+        df = pl.DataFrame({"val": []}, schema={"val": pl.Float64})
+        payload = {
+            "workflow": [
+                {"type": "view", "query": [
+                    {"op": "bin", "binBy": "val", "newBinCol": "b", "binSize": 10}
+                ]}
+            ]
+        }
+        result = execute_workflow(df, payload)
+        assert result == []
+
+    def test_bin_non_positive_bin_size(self):
+        # binSize == 0 would make the divisor zero (0/0 -> NaN) and blow up the
+        # Int64 cast; a non-positive size falls back to the default width.
+        df = pl.DataFrame({"val": [1, 2, 3]})
+        payload = {
+            "workflow": [
+                {"type": "view", "query": [
+                    {"op": "bin", "binBy": "val", "newBinCol": "b", "binSize": 0}
+                ]}
+            ]
+        }
+        result = execute_workflow(df, payload)
+        assert all(r["b"] == 0 for r in result)
+
 
 # ---------------------------------------------------------------------------
 # Raw tests
@@ -566,6 +618,91 @@ class TestTransform:
         qs = [r["q"] for r in result]
         # 20 rows / 4 bins = 5 rows per bin, 1-indexed.
         assert qs == [1] * 5 + [2] * 5 + [3] * 5 + [4] * 5
+
+    def test_bin_transform_degenerate(self):
+        """GW `bin` (equal-width) must not raise on a degenerate column.
+
+        A constant/single-row column has step == 0 (0/0 -> NaN); an all-null or
+        empty column has no min/max.  Each collapses to a single bucket rather
+        than blowing up the Int64 cast.
+        """
+        # constant: step == 0, every row lands in the same [lo, hi] bucket.
+        result = execute_workflow(
+            pl.DataFrame({"val": [5, 5, 5]}),
+            {"workflow": [{"type": "transform", "transform": [
+                {"key": "q", "expression": {"op": "bin", "params": ["val"], "as": "q", "num": 10}}
+            ]}]},
+        )
+        assert all(r["q"] == [5.0, 5.0] for r in result)
+
+        # single row.
+        result = execute_workflow(
+            pl.DataFrame({"val": [7]}),
+            {"workflow": [{"type": "transform", "transform": [
+                {"key": "q", "expression": {"op": "bin", "params": ["val"], "as": "q", "num": 10}}
+            ]}]},
+        )
+        assert result == [{"val": 7, "q": [7.0, 7.0]}]
+
+        # all-null: bounds are null, single (null) bucket, no raise.
+        result = execute_workflow(
+            pl.DataFrame({"val": [None, None]}, schema={"val": pl.Float64}),
+            {"workflow": [{"type": "transform", "transform": [
+                {"key": "q", "expression": {"op": "bin", "params": ["val"], "as": "q", "num": 10}}
+            ]}]},
+        )
+        assert all(r["q"] == [None, None] for r in result)
+
+        # empty frame: no rows, no raise.
+        result = execute_workflow(
+            pl.DataFrame({"val": []}, schema={"val": pl.Float64}),
+            {"workflow": [{"type": "transform", "transform": [
+                {"key": "q", "expression": {"op": "bin", "params": ["val"], "as": "q", "num": 10}}
+            ]}]},
+        )
+        assert result == []
+
+    def test_bin_count_transform_degenerate(self):
+        """GW `binCount` (quantile) must not raise on a degenerate column.
+
+        An empty column has group_size == 0 (0/0 -> NaN); constant/single-row/
+        all-null columns collapse to the first (1-indexed) bucket.
+        """
+        # constant column → still 1-indexed buckets, no raise.
+        result = execute_workflow(
+            pl.DataFrame({"val": [5, 5, 5]}),
+            {"workflow": [{"type": "transform", "transform": [
+                {"key": "q", "expression": {"op": "binCount", "params": ["val"], "as": "q", "num": 4}}
+            ]}]},
+        )
+        assert all(r["q"] >= 1 for r in result)
+
+        # single row → bucket 1.
+        result = execute_workflow(
+            pl.DataFrame({"val": [7]}),
+            {"workflow": [{"type": "transform", "transform": [
+                {"key": "q", "expression": {"op": "binCount", "params": ["val"], "as": "q", "num": 4}}
+            ]}]},
+        )
+        assert result == [{"val": 7, "q": 1}]
+
+        # all-null → group_size == 0, every row collapses to bucket 1.
+        result = execute_workflow(
+            pl.DataFrame({"val": [None, None]}, schema={"val": pl.Float64}),
+            {"workflow": [{"type": "transform", "transform": [
+                {"key": "q", "expression": {"op": "binCount", "params": ["val"], "as": "q", "num": 4}}
+            ]}]},
+        )
+        assert all(r["q"] == 1 for r in result)
+
+        # empty frame: no rows, no raise.
+        result = execute_workflow(
+            pl.DataFrame({"val": []}, schema={"val": pl.Float64}),
+            {"workflow": [{"type": "transform", "transform": [
+                {"key": "q", "expression": {"op": "binCount", "params": ["val"], "as": "q", "num": 4}}
+            ]}]},
+        )
+        assert result == []
 
     def test_log_transform(self):
         df = pl.DataFrame({"val": [1.0, 10.0, 100.0]})
