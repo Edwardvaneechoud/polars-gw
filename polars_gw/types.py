@@ -20,6 +20,12 @@ WorkflowStepType = Literal["filter", "view", "sort", "transform"]
 SemanticType = Literal["quantitative", "temporal", "nominal", "ordinal"]
 AnalyticType = Literal["measure", "dimension"]
 
+# How integer columns are split into dimension vs measure (see get_fields):
+#   "sample"  — exact n_unique over the first 1000 rows (PyGWalker df[:1000] parity)
+#   "scan"    — approx_n_unique over the whole frame (one pass; correct when sorted)
+#   "measure" — every integer is a measure; no data access
+ClassifyIntegers = Literal["sample", "scan", "measure"]
+
 TransformOp = Literal[
     "one", "expr", "paint", "bin", "log", "log2", "log10",
     "binCount", "dateTimeDrill", "dateTimeFeature",
@@ -192,3 +198,17 @@ class _IMutFieldRequired(TypedDict):
 
 class IMutField(_IMutFieldRequired, total=False):
     aggName: str  # only present on measures, typically "sum"
+
+
+class IMutFieldOverride(TypedDict, total=False):
+    """Per-column override shallow-merged into a field after dtype inference.
+
+    Every key is optional; supply only the ones you want to change. Setting
+    ``analyticType`` also skips the (potentially expensive) distinct-count pass
+    for that integer column, since its analytic role is then predetermined.
+    """
+
+    analyticType: AnalyticType
+    semanticType: SemanticType
+    aggName: str
+    name: str
