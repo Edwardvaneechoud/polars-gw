@@ -64,11 +64,11 @@ def get_fields(
             only ``analyticType`` is decided. Floats/Decimal are always
             measures and other dtypes are unaffected.
 
-            - ``"sample"`` (default): exact ``n_unique`` over the first
-              ``1000`` rows; ``<= 16`` distinct → dimension, else measure.
-              Replicates PyGWalker's ``df[:1000]`` + ``<= 16`` rule, so it
-              touches up to 1000 rows at call time (a small collect for a
-              LazyFrame).
+            - ``"sample"`` (default): approximate ``approx_n_unique`` over
+              the first ``1000`` rows; ``<= 16`` distinct → dimension, else
+              measure. Uses PyGWalker's ``df[:1000]`` + ``<= 16`` window and
+              threshold, so it touches up to 1000 rows at call time (a small
+              collect for a LazyFrame).
             - ``"scan"``: ``approx_n_unique`` over the *whole* frame (one
               streaming pass); same threshold. Correct even on sorted or
               clustered columns where the head sample is unrepresentative.
@@ -160,7 +160,7 @@ def _classify_integers(
 
     if mode == "sample":
         frame = df.head(_SAMPLE_ROWS)
-        exprs = [pl.col(c).n_unique().alias(c) for c in cols]
+        exprs = [pl.col(c).approx_n_unique().alias(c) for c in cols]
     else:  # "scan"
         frame = df
         exprs = [pl.col(c).approx_n_unique().alias(c) for c in cols]

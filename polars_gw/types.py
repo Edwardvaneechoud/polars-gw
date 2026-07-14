@@ -21,7 +21,7 @@ SemanticType = Literal["quantitative", "temporal", "nominal", "ordinal"]
 AnalyticType = Literal["measure", "dimension"]
 
 # How integer columns are split into dimension vs measure (see get_fields):
-#   "sample"  — exact n_unique over the first 1000 rows (PyGWalker df[:1000] parity)
+#   "sample"  — approx_n_unique over the first 1000 rows (PyGWalker df[:1000] window)
 #   "scan"    — approx_n_unique over the whole frame (one pass; correct when sorted)
 #   "measure" — every integer is a measure; no data access
 ClassifyIntegers = Literal["sample", "scan", "measure"]

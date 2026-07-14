@@ -18,6 +18,7 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: viz_pkg/dist/
+          skip-existing: true
 
   publish-core:
     needs: publish-viz
@@ -30,3 +31,4 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
+          skip-existing: true

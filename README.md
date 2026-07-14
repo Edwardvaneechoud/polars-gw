@@ -145,7 +145,7 @@ the cost is yours to choose:
 
 | `classify_integers` | Data access | Rule |
 |---------------------|-------------|------|
-| `"sample"` (default) | first 1000 rows | exact distinct count; ≤16 → dimension, else measure |
+| `"sample"` (default) | first 1000 rows | approximate distinct count; ≤16 → dimension, else measure |
 | `"scan"` | one full pass | approximate distinct count over the whole frame; correct even on sorted/clustered columns where the head sample lies |
 | `"measure"` | none | every integer is a measure — the escape hatch for lazy pipelines too expensive to touch |
 
@@ -176,12 +176,14 @@ column, so overriding is free.
 
 ### Field-inference parity
 
-The default `classify_integers="sample"` reproduces PyGWalker's field inference
-**exactly**: it classifies from the first 1000 rows (`df[:1000]`) and treats an
-integer with ≤16 distinct values as a dimension, otherwise a measure. Deliberate
-differences: `"scan"` and `"measure"` are polars-gw additions PyGWalker has no
-equivalent for, and polars-gw does **not** force geo-named columns
-(lat/long/latitude/longitude) to dimensions the way PyGWalker does.
+The default `classify_integers="sample"` mirrors PyGWalker's field inference: it
+classifies from the first 1000 rows (`df[:1000]`) and treats an integer with ≤16
+distinct values as a dimension, otherwise a measure. The distinct count uses
+Polars' `approx_n_unique` rather than an exact count, so classification matches
+PyGWalker in practice but is not guaranteed bit-for-bit at the ≤16 boundary.
+Deliberate differences: `"scan"` and `"measure"` are polars-gw additions
+PyGWalker has no equivalent for, and polars-gw does **not** force geo-named
+columns (lat/long/latitude/longitude) to dimensions the way PyGWalker does.
 
 ### Compute path
 
