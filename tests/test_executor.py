@@ -7,7 +7,7 @@ import weakref
 import polars as pl
 import pytest
 
-from polars_gw.executor import _cache, _cache_key, clear_cache, execute_workflow
+from polars_gw.executor import _cache, _cache_key, _content_key, clear_cache, execute_workflow
 
 
 @pytest.fixture(autouse=True)
@@ -1066,3 +1066,41 @@ class TestResultCache:
             out = execute_workflow(df, _SUM_PAYLOAD)
             assert out == [{"s": 2 * i}], f"iteration {i} served stale rows"
             del df
+
+    def test_scan_content_key_hits_across_distinct_frames(self, tmp_path):
+        """Two fresh scan_parquet(same path) frames share one content-keyed entry."""
+        clear_cache()
+        p = tmp_path / "data.parquet"
+        pl.DataFrame({"v": [10, 20, 30]}).write_parquet(p)  # sum = 60
+        a = pl.scan_parquet(p)
+        assert execute_workflow(a, _SUM_PAYLOAD) == [{"s": 60}]
+        assert len(_cache) == 1
+        # Poison the stored rows to prove b is served from a's entry, not recomputed.
+        k, (w, _) = next(iter(_cache.items()))
+        assert w is None  # content entry -> self-validating (no weakref)
+        _cache[k] = (None, [{"s": -1}])
+        b = pl.scan_parquet(p)
+        assert a is not b
+        assert execute_workflow(b, _SUM_PAYLOAD) == [{"s": -1}]  # content hit off a's entry
+        assert len(_cache) == 1  # no second (id-keyed) entry created
+
+    def test_scan_content_key_distinguishes_files(self, tmp_path):
+        """Scans of different files never collide (distinct plan -> distinct key)."""
+        clear_cache()
+        pa = tmp_path / "a.parquet"
+        pb = tmp_path / "b.parquet"
+        pl.DataFrame({"v": [1, 2]}).write_parquet(pa)  # sum = 3
+        pl.DataFrame({"v": [10, 20]}).write_parquet(pb)  # sum = 30
+        assert execute_workflow(pl.scan_parquet(pa), _SUM_PAYLOAD) == [{"s": 3}]
+        assert execute_workflow(pl.scan_parquet(pb), _SUM_PAYLOAD) == [{"s": 30}]
+        assert len(_cache) == 2
+
+    def test_content_key_classifier(self, tmp_path):
+        """_content_key content-keys scans and skips eager / in-memory frames."""
+        p = tmp_path / "c.parquet"
+        pl.DataFrame({"v": [1]}).write_parquet(p)
+        assert _content_key(pl.scan_parquet(p)) is not None
+        # deterministic across two distinct scan objects of the same source
+        assert _content_key(pl.scan_parquet(p)) == _content_key(pl.scan_parquet(p))
+        assert _content_key(pl.LazyFrame({"v": [1]})) is None  # in-memory -> skip serialize
+        assert _content_key(pl.DataFrame({"v": [1]})) is None  # eager -> skip

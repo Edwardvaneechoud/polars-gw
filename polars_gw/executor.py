@@ -58,6 +58,36 @@ def _cache_key(prefix: str, payload: IDataQueryPayload, max_rows: int | None) ->
     return f"{prefix}|{digest}|{max_rows}"
 
 
+def _content_key(df: pl.DataFrame | pl.LazyFrame) -> str | None:
+    """Content hash of a *scan-based* LazyFrame's query plan, else ``None``.
+
+    A serialized scan plan (parquet/csv/…) is tiny (~1 KB) and deterministic, so
+    two fresh ``scan_parquet(path)`` frames with the same source hash to the same
+    key and share one cache entry — unlike ``id()``, which recycles.  Eager
+    DataFrames and *in-memory* LazyFrames return ``None`` (they take the
+    id()+weakref path): serializing them would copy the whole dataset.
+
+    The ``"DF ["`` marker (polars' in-memory frame node) is correctness-safe in
+    both directions — a false positive falls to the id() path (correct, no
+    content hit); a false negative pays one expensive serialize but still keys on
+    real content.  Any explain/serialize failure or version drift returns
+    ``None``, so misclassification only ever costs performance, never correctness.
+    """
+    if not isinstance(df, pl.LazyFrame):
+        return None
+    try:
+        plan = df.explain(optimized=False)  # ~0.03 ms, does not materialise data
+    except Exception:  # noqa: BLE001 - any failure just disables content-keying
+        return None
+    if "DF [" in plan:
+        return None
+    try:
+        blob = df.serialize(format="binary")  # ~0.01 ms / ~1 KB for a scan
+    except Exception:  # noqa: BLE001 - unserialisable plan -> fall back to id()
+        return None
+    return hashlib.md5(blob, usedforsecurity=False).hexdigest()
+
+
 def clear_cache() -> None:
     """Drop all cached query results."""
     _cache.clear()
@@ -75,7 +105,11 @@ def execute_workflow(
     the end, letting Polars optimise predicate push-down and projection.
 
     Results are cached by payload so that duplicate queries (common when
-    reshuffling fields in the UI) return instantly.
+    reshuffling fields in the UI) return instantly.  For a LazyFrame backed by a
+    file scan the key is the serialized scan plan, so two fresh
+    ``scan_parquet(path)`` frames share an entry; the tradeoff is that if the
+    file at that path changes on disk mid-session, a stale result may be served
+    until the entry is evicted (the cache holds at most 64 entries).
 
     Args:
         df: The source DataFrame (or LazyFrame) to query.
@@ -92,12 +126,20 @@ def execute_workflow(
     """
     rid_token = _request_id.set(uuid.uuid4().hex[:8])
     try:
-        # id()-keyed with a weakref validator.  If df is later garbage-collected
-        # and a new frame reuses its id(), wref() returns the dead frame (or None)
-        # rather than the new df, so the identity check fails and we recompute
-        # instead of serving stale rows.
-        key = _cache_key(f"I|{id(df)}", payload, max_rows)
-        validator: pl.DataFrame | pl.LazyFrame | None = df
+        # Prefer a content key for scan-based LazyFrames so fresh scan_parquet(...)
+        # temporaries share a cache entry (id() would recycle).  Everything else
+        # uses id()+weakref: if df is later garbage-collected and a new frame
+        # reuses its id(), wref() returns the dead frame (or None) rather than the
+        # new df, so the identity check fails and we recompute instead of serving
+        # stale rows.
+        validator: pl.DataFrame | pl.LazyFrame | None
+        ckey = _content_key(df)
+        if ckey is not None:
+            key = _cache_key(f"C|{ckey}", payload, max_rows)
+            validator = None  # content keys self-validate
+        else:
+            key = _cache_key(f"I|{id(df)}", payload, max_rows)
+            validator = df
         entry = _cache.get(key)
         if entry is not None:
             wref, cached = entry
