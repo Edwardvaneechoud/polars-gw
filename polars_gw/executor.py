@@ -6,7 +6,9 @@ import contextvars
 import hashlib
 import json
 import logging
+import threading
 import uuid
+import weakref
 from typing import Any
 
 import polars as pl
@@ -39,13 +41,21 @@ def _log(level: int, msg: str, *args: Any) -> None:
 DEFAULT_MAX_ROWS: int = 1_000_000
 
 _CACHE_MAX_ENTRIES: int = 64
-_cache: dict[str, list[dict[str, Any]]] = {}
+# Each entry pairs the result rows with a *validator*: a weakref to the source
+# frame for id()-keyed entries (see below), or ``None`` for self-validating
+# content-keyed entries.  The weakref lets us detect CPython recycling an id()
+# onto a brand-new frame and serving it a dead frame's rows.
+_cache: dict[str, tuple[weakref.ref | None, list[dict[str, Any]]]] = {}
+# Guards only the tiny evict+store mutation — never the collect().  The FastAPI
+# ``/api/compute`` endpoint is a sync def, so uvicorn runs it in a threadpool and
+# hits this global dict concurrently.
+_cache_lock = threading.Lock()
 
 
-def _cache_key(df_id: int, payload: IDataQueryPayload, max_rows: int | None) -> str:
+def _cache_key(prefix: str, payload: IDataQueryPayload, max_rows: int | None) -> str:
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     digest = hashlib.md5(raw.encode(), usedforsecurity=False).hexdigest()
-    return f"{df_id}|{digest}|{max_rows}"
+    return f"{prefix}|{digest}|{max_rows}"
 
 
 def clear_cache() -> None:
@@ -82,11 +92,20 @@ def execute_workflow(
     """
     rid_token = _request_id.set(uuid.uuid4().hex[:8])
     try:
-        key = _cache_key(id(df), payload, max_rows)
-        cached = _cache.get(key)
-        if cached is not None:
-            _log(logging.INFO, "execute_workflow: cache hit (%d row(s))", len(cached))
-            return cached
+        # id()-keyed with a weakref validator.  If df is later garbage-collected
+        # and a new frame reuses its id(), wref() returns the dead frame (or None)
+        # rather than the new df, so the identity check fails and we recompute
+        # instead of serving stale rows.
+        key = _cache_key(f"I|{id(df)}", payload, max_rows)
+        validator: pl.DataFrame | pl.LazyFrame | None = df
+        entry = _cache.get(key)
+        if entry is not None:
+            wref, cached = entry
+            # wref is None => self-validating content key (added below); otherwise
+            # the entry is only valid if the weakref still points at *this* df.
+            if wref is None or wref() is validator:
+                _log(logging.INFO, "execute_workflow: cache hit (%d row(s))", len(cached))
+                return cached
 
         lf = df
 
@@ -152,10 +171,24 @@ def execute_workflow(
         _log(logging.INFO, "execute_workflow: returned %d row(s)", len(result))
         _log(logging.DEBUG, f"execute_workflow: returned {str(result[:min(len(result), 20)])}")
 
-        if len(_cache) >= _CACHE_MAX_ENTRIES:
-            evict_key = next(iter(_cache))
-            del _cache[evict_key]
-        _cache[key] = result
+        if validator is not None:
+            try:
+                wref = weakref.ref(df)
+            except TypeError:
+                # Frame type doesn't support weak references (e.g. an exotic
+                # subclass); skip caching rather than store an id() entry we
+                # can't validate against recycling.
+                return result
+        else:
+            wref = None
+
+        with _cache_lock:
+            if len(_cache) >= _CACHE_MAX_ENTRIES and key not in _cache:
+                try:
+                    del _cache[next(iter(_cache))]
+                except (StopIteration, KeyError):
+                    pass
+            _cache[key] = (wref, result)
 
         return result
     finally:
