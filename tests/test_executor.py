@@ -1,21 +1,23 @@
 """Tests for polars_gw.executor — GW workflow → Polars translation."""
 
 import datetime
+import gc
+import weakref
 
 import polars as pl
 import pytest
 
-from polars_gw.executor import clear_cache, execute_workflow
+from polars_gw.executor import _cache, _cache_key, _content_key, clear_cache, execute_workflow
 
 
 @pytest.fixture(autouse=True)
 def _isolate_executor_cache():
-    """Reset the module-level result cache around every test.
+    """Reset the module-level result cache around every test for isolation.
 
-    ``execute_workflow`` caches by ``id(df)`` + payload digest.  Transient
-    DataFrames built inline in different tests can be garbage-collected and
-    have their ``id()`` reused, so without isolation a later test issuing the
-    same payload could receive an earlier test's stale, cached rows.
+    The cache is weakref-validated against ``id()`` recycling (guarded by
+    ``TestResultCache``), so this fixture is no longer load-bearing for
+    correctness — it just keeps per-test cache state independent and makes
+    assertions on ``len(_cache)`` deterministic.
     """
     clear_cache()
     yield
@@ -988,3 +990,117 @@ class TestMaxRows:
         # Just verify the parameter default works (don't allocate 1M+ rows)
         result = execute_workflow(_sample_df(), {"workflow": []})
         assert len(result) == 5  # 5 < 1M, so all rows returned
+
+
+# Aggregate a single "v" column to its sum, tagged "s" — one row out, so each
+# frame's result is trivially distinguishable when checking for id() recycling.
+_SUM_PAYLOAD = {
+    "workflow": [
+        {
+            "type": "view",
+            "query": [
+                {
+                    "op": "aggregate",
+                    "groupBy": [],
+                    "measures": [{"field": "v", "agg": "sum", "asFieldKey": "s"}],
+                }
+            ],
+        }
+    ]
+}
+
+
+class TestResultCache:
+    """Regression tests for the weakref-validated result cache.
+
+    The cache is keyed on ``id(df)``; CPython recycles an id() after its frame
+    is garbage-collected, so a stale entry under that id() must never be served
+    to a new frame that reuses the address.  These reproduce the hazard
+    deterministically by poisoning the cache, rather than relying on the autouse
+    fixture (which only clears at test boundaries, not mid-test).
+    """
+
+    def test_stale_entry_with_live_foreign_frame_is_not_served(self):
+        """A weakref pointing at a DIFFERENT live frame must invalidate the entry."""
+        clear_cache()
+        df = pl.DataFrame({"v": [3, 4]})  # eager -> id()+weakref path; real sum = 7
+        key = _cache_key(f"I|{id(df)}", _SUM_PAYLOAD, 100)
+        other = pl.DataFrame({"v": [999]})  # kept alive: wref() returns this, not df
+        _cache[key] = (weakref.ref(other), [{"s": -1}])
+        out = execute_workflow(df, _SUM_PAYLOAD, max_rows=100)
+        assert out == [{"s": 7}]  # collision detected -> recomputed, not poison
+
+    def test_stale_entry_with_dead_weakref_is_not_served(self):
+        """A dead weakref (original frame GC'd) must invalidate the entry."""
+        clear_cache()
+        df = pl.DataFrame({"v": [5, 6]})  # real sum = 11
+        key = _cache_key(f"I|{id(df)}", _SUM_PAYLOAD, 100)
+        dead = pl.DataFrame({"v": [999]})
+        wref = weakref.ref(dead)
+        del dead
+        gc.collect()
+        assert wref() is None  # precondition: target collected
+        _cache[key] = (wref, [{"s": -1}])
+        out = execute_workflow(df, _SUM_PAYLOAD, max_rows=100)
+        assert out == [{"s": 11}]
+
+    def test_live_frame_repeated_query_hits_cache(self):
+        """The same live object re-queried validates and is served the cached rows."""
+        clear_cache()
+        df = pl.DataFrame({"v": [1, 2, 3]})  # sum = 6
+        first = execute_workflow(df, _SUM_PAYLOAD)
+        assert first == [{"s": 6}]
+        assert len(_cache) == 1
+        second = execute_workflow(df, _SUM_PAYLOAD)
+        assert second is first  # weakref validates -> same cached list object
+
+    def test_recycled_id_across_frames_never_serves_stale(self):
+        """End-to-end repro: 200 fresh frames, each a distinct sum, no fixture reset.
+
+        Without the weakref fix this returns the first frame's rows for nearly
+        every later frame (all reuse one recycled address).
+        """
+        clear_cache()
+        for i in range(200):
+            df = pl.DataFrame({"v": [i, i]})  # sum = 2*i
+            out = execute_workflow(df, _SUM_PAYLOAD)
+            assert out == [{"s": 2 * i}], f"iteration {i} served stale rows"
+            del df
+
+    def test_scan_content_key_hits_across_distinct_frames(self, tmp_path):
+        """Two fresh scan_parquet(same path) frames share one content-keyed entry."""
+        clear_cache()
+        p = tmp_path / "data.parquet"
+        pl.DataFrame({"v": [10, 20, 30]}).write_parquet(p)  # sum = 60
+        a = pl.scan_parquet(p)
+        assert execute_workflow(a, _SUM_PAYLOAD) == [{"s": 60}]
+        assert len(_cache) == 1
+        # Poison the stored rows to prove b is served from a's entry, not recomputed.
+        k, (w, _) = next(iter(_cache.items()))
+        assert w is None  # content entry -> self-validating (no weakref)
+        _cache[k] = (None, [{"s": -1}])
+        b = pl.scan_parquet(p)
+        assert a is not b
+        assert execute_workflow(b, _SUM_PAYLOAD) == [{"s": -1}]  # content hit off a's entry
+        assert len(_cache) == 1  # no second (id-keyed) entry created
+
+    def test_scan_content_key_distinguishes_files(self, tmp_path):
+        """Scans of different files never collide (distinct plan -> distinct key)."""
+        clear_cache()
+        pa = tmp_path / "a.parquet"
+        pb = tmp_path / "b.parquet"
+        pl.DataFrame({"v": [1, 2]}).write_parquet(pa)  # sum = 3
+        pl.DataFrame({"v": [10, 20]}).write_parquet(pb)  # sum = 30
+        assert execute_workflow(pl.scan_parquet(pa), _SUM_PAYLOAD) == [{"s": 3}]
+        assert execute_workflow(pl.scan_parquet(pb), _SUM_PAYLOAD) == [{"s": 30}]
+        assert len(_cache) == 2
+
+    def test_content_key_classifier(self, tmp_path):
+        """_content_key content-keys scans and skips eager / in-memory frames."""
+        p = tmp_path / "c.parquet"
+        pl.DataFrame({"v": [1]}).write_parquet(p)
+        assert _content_key(pl.scan_parquet(p)) is not None
+        # deterministic across two distinct scan objects of the same source
+        assert _content_key(pl.scan_parquet(p)) == _content_key(pl.scan_parquet(p))
+        assert _content_key(pl.LazyFrame({"v": [1]})) is None  # in-memory -> skip serialize
+        assert _content_key(pl.DataFrame({"v": [1]})) is None  # eager -> skip

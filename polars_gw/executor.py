@@ -6,7 +6,9 @@ import contextvars
 import hashlib
 import json
 import logging
+import threading
 import uuid
+import weakref
 from typing import Any
 
 import polars as pl
@@ -39,13 +41,51 @@ def _log(level: int, msg: str, *args: Any) -> None:
 DEFAULT_MAX_ROWS: int = 1_000_000
 
 _CACHE_MAX_ENTRIES: int = 64
-_cache: dict[str, list[dict[str, Any]]] = {}
+# Each entry pairs the result rows with a *validator*: a weakref to the source
+# frame for id()-keyed entries (see below), or ``None`` for self-validating
+# content-keyed entries.  The weakref lets us detect CPython recycling an id()
+# onto a brand-new frame and serving it a dead frame's rows.
+_cache: dict[str, tuple[weakref.ref | None, list[dict[str, Any]]]] = {}
+# Guards only the tiny evict+store mutation — never the collect().  The FastAPI
+# ``/api/compute`` endpoint is a sync def, so uvicorn runs it in a threadpool and
+# hits this global dict concurrently.
+_cache_lock = threading.Lock()
 
 
-def _cache_key(df_id: int, payload: IDataQueryPayload, max_rows: int | None) -> str:
+def _cache_key(prefix: str, payload: IDataQueryPayload, max_rows: int | None) -> str:
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     digest = hashlib.md5(raw.encode(), usedforsecurity=False).hexdigest()
-    return f"{df_id}|{digest}|{max_rows}"
+    return f"{prefix}|{digest}|{max_rows}"
+
+
+def _content_key(df: pl.DataFrame | pl.LazyFrame) -> str | None:
+    """Content hash of a *scan-based* LazyFrame's query plan, else ``None``.
+
+    A serialized scan plan (parquet/csv/…) is tiny (~1 KB) and deterministic, so
+    two fresh ``scan_parquet(path)`` frames with the same source hash to the same
+    key and share one cache entry — unlike ``id()``, which recycles.  Eager
+    DataFrames and *in-memory* LazyFrames return ``None`` (they take the
+    id()+weakref path): serializing them would copy the whole dataset.
+
+    The ``"DF ["`` marker (polars' in-memory frame node) is correctness-safe in
+    both directions — a false positive falls to the id() path (correct, no
+    content hit); a false negative pays one expensive serialize but still keys on
+    real content.  Any explain/serialize failure or version drift returns
+    ``None``, so misclassification only ever costs performance, never correctness.
+    """
+    if not isinstance(df, pl.LazyFrame):
+        return None
+    try:
+        plan = df.explain(optimized=False)  # ~0.03 ms, does not materialise data
+    except Exception:  # noqa: BLE001 - any failure just disables content-keying
+        return None
+    if "DF [" in plan:
+        return None
+    try:
+        blob = df.serialize(format="binary")  # ~0.01 ms / ~1 KB for a scan
+    except Exception:  # noqa: BLE001 - unserialisable plan -> fall back to id()
+        return None
+    return hashlib.md5(blob, usedforsecurity=False).hexdigest()
 
 
 def clear_cache() -> None:
@@ -65,7 +105,11 @@ def execute_workflow(
     the end, letting Polars optimise predicate push-down and projection.
 
     Results are cached by payload so that duplicate queries (common when
-    reshuffling fields in the UI) return instantly.
+    reshuffling fields in the UI) return instantly.  For a LazyFrame backed by a
+    file scan the key is the serialized scan plan, so two fresh
+    ``scan_parquet(path)`` frames share an entry; the tradeoff is that if the
+    file at that path changes on disk mid-session, a stale result may be served
+    until the entry is evicted (the cache holds at most 64 entries).
 
     Args:
         df: The source DataFrame (or LazyFrame) to query.
@@ -82,11 +126,28 @@ def execute_workflow(
     """
     rid_token = _request_id.set(uuid.uuid4().hex[:8])
     try:
-        key = _cache_key(id(df), payload, max_rows)
-        cached = _cache.get(key)
-        if cached is not None:
-            _log(logging.INFO, "execute_workflow: cache hit (%d row(s))", len(cached))
-            return cached
+        # Prefer a content key for scan-based LazyFrames so fresh scan_parquet(...)
+        # temporaries share a cache entry (id() would recycle).  Everything else
+        # uses id()+weakref: if df is later garbage-collected and a new frame
+        # reuses its id(), wref() returns the dead frame (or None) rather than the
+        # new df, so the identity check fails and we recompute instead of serving
+        # stale rows.
+        validator: pl.DataFrame | pl.LazyFrame | None
+        ckey = _content_key(df)
+        if ckey is not None:
+            key = _cache_key(f"C|{ckey}", payload, max_rows)
+            validator = None  # content keys self-validate
+        else:
+            key = _cache_key(f"I|{id(df)}", payload, max_rows)
+            validator = df
+        entry = _cache.get(key)
+        if entry is not None:
+            wref, cached = entry
+            # wref is None => self-validating content key (added below); otherwise
+            # the entry is only valid if the weakref still points at *this* df.
+            if wref is None or wref() is validator:
+                _log(logging.INFO, "execute_workflow: cache hit (%d row(s))", len(cached))
+                return cached
 
         lf = df
 
@@ -152,10 +213,24 @@ def execute_workflow(
         _log(logging.INFO, "execute_workflow: returned %d row(s)", len(result))
         _log(logging.DEBUG, f"execute_workflow: returned {str(result[:min(len(result), 20)])}")
 
-        if len(_cache) >= _CACHE_MAX_ENTRIES:
-            evict_key = next(iter(_cache))
-            del _cache[evict_key]
-        _cache[key] = result
+        if validator is not None:
+            try:
+                wref = weakref.ref(df)
+            except TypeError:
+                # Frame type doesn't support weak references (e.g. an exotic
+                # subclass); skip caching rather than store an id() entry we
+                # can't validate against recycling.
+                return result
+        else:
+            wref = None
+
+        with _cache_lock:
+            if len(_cache) >= _CACHE_MAX_ENTRIES and key not in _cache:
+                try:
+                    del _cache[next(iter(_cache))]
+                except (StopIteration, KeyError):
+                    pass
+            _cache[key] = (wref, result)
 
         return result
     finally:
