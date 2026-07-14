@@ -14,6 +14,7 @@ from polars_gw.types import (
     ViewQuery,
     WorkflowStep,
 )
+from polars_gw.viz import walk
 
 __all__ = [
     "Aggregator",
@@ -31,7 +32,7 @@ __all__ = [
     "get_fields",
     "walk",
 ]
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 
 
 def __getattr__(name: str):
