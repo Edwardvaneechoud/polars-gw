@@ -38,7 +38,6 @@ logger = logging.getLogger(__name__)
 try:
     import uvicorn
     from fastapi import FastAPI, Request
-    from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import HTMLResponse
     from fastapi.staticfiles import StaticFiles
     from pydantic import BaseModel
@@ -56,7 +55,6 @@ except ImportError as _exc:  # pragma: no cover - exercised only without extras 
     uvicorn = None  # type: ignore[assignment]
     FastAPI = None  # type: ignore[assignment]
     Request = None  # type: ignore[assignment]
-    CORSMiddleware = None  # type: ignore[assignment]
     HTMLResponse = None  # type: ignore[assignment]
     StaticFiles = None  # type: ignore[assignment]
     ComputeRequest = None  # type: ignore[assignment]
@@ -264,12 +262,6 @@ def walk(
     fields = get_fields(df, field_overrides=field_overrides)
 
     app = FastAPI()
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
     app.mount(
         "/static",
         StaticFiles(directory=_assets_dir()),
