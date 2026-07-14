@@ -103,6 +103,23 @@ class TestWalk:
         finally:
             handle.stop()
 
+    def test_no_cross_origin_headers(self, sample_df: pl.DataFrame) -> None:
+        """A cross-origin request must not receive Access-Control-Allow-* headers."""
+        handle = walk(sample_df, open_browser=False)
+        try:
+            _wait_until_up(handle.url)
+            req = urllib.request.Request(
+                f"{handle.url}/api/fields",
+                data=b"",
+                method="POST",
+                headers={"Content-Type": "application/json", "Origin": "https://evil.com"},
+            )
+            with urllib.request.urlopen(req) as r:  # noqa: S310 - localhost only
+                assert r.status == 200
+                assert r.headers.get("Access-Control-Allow-Origin") is None
+        finally:
+            handle.stop()
+
     def test_handle_stop_frees_port(self, sample_df: pl.DataFrame) -> None:
         handle = walk(sample_df, open_browser=False)
         _wait_until_up(handle.url)
