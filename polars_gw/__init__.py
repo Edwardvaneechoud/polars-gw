@@ -5,8 +5,10 @@ from polars_gw.fields import get_fields
 from polars_gw.types import (
     Aggregator,
     AnalyticType,
+    ClassifyIntegers,
     IDataQueryPayload,
     IMutField,
+    IMutFieldOverride,
     Measure,
     SemanticType,
     ViewQuery,
@@ -16,9 +18,11 @@ from polars_gw.types import (
 __all__ = [
     "Aggregator",
     "AnalyticType",
+    "ClassifyIntegers",
     "DEFAULT_MAX_ROWS",
     "IDataQueryPayload",
     "IMutField",
+    "IMutFieldOverride",
     "Measure",
     "SemanticType",
     "ViewQuery",

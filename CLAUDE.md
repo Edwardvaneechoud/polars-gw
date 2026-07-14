@@ -34,7 +34,7 @@ cd js && npm install && npm run build
 
 - **`executor.py`** — Central translation engine. Converts GW workflow payloads into Polars lazy query plans. Supports filters (range, temporal, one-of, not-in, regexp), aggregations, fold (unpivot), bin, raw field selection, sort, and transforms (bin, log, dateTime drill/feature, arbitrary SQL via `pl.sql_expr()`). Builds the full query lazily, then collects once at the end.
 
-- **`fields.py`** — Converts Polars DataFrame schema to GW `IMutField` format. Classification matches PyGWalker: int→quantitative/dimension, float→quantitative/measure (with `aggName:"sum"`), temporal→temporal/dimension, string/bool/categorical→nominal/dimension. Supports user-provided field overrides.
+- **`fields.py`** — Converts Polars DataFrame schema to GW `IMutField` format. Classification: float/Decimal→quantitative/measure (with `aggName:"sum"`), temporal→temporal/dimension, string/bool/categorical→nominal/dimension. Integers are quantitative and split into dimension vs measure by distinct-value count via the `classify_integers` arg: `"sample"` (default — exact count over the first 1000 rows, ≤16 distinct→dimension else measure, matching PyGWalker's `df[:1000]` rule), `"scan"` (approximate count over the whole frame; correct on sorted/clustered columns), or `"measure"` (every integer→measure, zero data access). Supports typed per-field overrides (`IMutFieldOverride`); an override that pins `analyticType` skips the count for that column.
 
 - **`types.py`** — Literal type definitions for GW payload structures (FilterRuleType, Aggregator, ViewQueryOp, SemanticType, AnalyticType, etc.).
 

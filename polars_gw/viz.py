@@ -23,6 +23,7 @@ import socket
 import threading
 import time
 import webbrowser
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
@@ -32,6 +33,7 @@ import polars as pl
 
 from polars_gw.executor import DEFAULT_MAX_ROWS, execute_workflow
 from polars_gw.fields import get_fields
+from polars_gw.types import ClassifyIntegers, IMutFieldOverride
 
 logger = logging.getLogger(__name__)
 
@@ -203,7 +205,8 @@ def walk(
     open_browser: bool = True,
     max_rows: int | None = DEFAULT_MAX_ROWS,
     log_level: str = "info",
-    field_overrides: dict[str, dict[str, Any]] | None = None,
+    field_overrides: Mapping[str, IMutFieldOverride] | None = None,
+    classify_integers: ClassifyIntegers = "sample",
 ) -> WalkHandle:
     """Launch a local Graphic Walker UI connected to ``df``.
 
@@ -212,8 +215,9 @@ def walk(
     :func:`polars_gw.execute_workflow`.
 
     Args:
-        df: The DataFrame (or LazyFrame) to explore.  LazyFrames are
-            collected eagerly so the field schema is stable.
+        df: The DataFrame (or LazyFrame) to explore.  The schema is read
+            without materializing the data, except for the integer
+            classification sample — see ``classify_integers``.
         spec_file: Path to a JSON file containing a saved Graphic Walker
             chart spec (an ``IChart[]`` array).  When provided, the
             charts are restored in the UI on load.  Use
@@ -231,10 +235,17 @@ def walk(
             and for uvicorn's request logs.  Defaults to ``"info"`` so
             you see compute timings + cap warnings in the REPL.  Set
             to ``"warning"`` for less noise, ``"debug"`` for more.
-        field_overrides: Forwarded to :func:`get_fields` — shallow-merge
-            override for any per-field key (``analyticType``,
-            ``semanticType``, ``aggName``, …). Useful when the dtype rule
-            mis-labels a column (e.g. an int code that should be a measure).
+        field_overrides: Forwarded to :func:`get_fields` — a
+            ``{column: IMutFieldOverride}`` shallow-merge override for any
+            per-field key (``analyticType``, ``semanticType``, ``aggName``,
+            ``name``). Useful when the dtype rule mis-labels a column (e.g.
+            an int code that should be a measure).
+        classify_integers: Forwarded to :func:`get_fields` — how integer
+            columns split into dimension vs measure (``"sample"`` (default),
+            ``"scan"``, or ``"measure"``). Note that the default ``"sample"``
+            (and ``"scan"``) samples the frame once at startup to count
+            distinct values; for a LazyFrame with an expensive plan pass
+            ``classify_integers="measure"`` to skip all data access.
 
     Returns:
         A :class:`WalkHandle` with ``.url``, ``.stop()``, and ``.export()``.
@@ -259,7 +270,7 @@ def walk(
         spec_store = raw
         logger.info("Loaded %d chart(s) from %s", len(spec_store), p)
 
-    fields = get_fields(df, field_overrides=field_overrides)
+    fields = get_fields(df, field_overrides=field_overrides, classify_integers=classify_integers)
 
     app = FastAPI()
     app.mount(

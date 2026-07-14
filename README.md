@@ -132,11 +132,58 @@ results = execute_workflow(df, payload)
 | Polars Type | Semantic Type | Analytic Type |
 |-------------|---------------|---------------|
 | Float*, Decimal | quantitative | measure |
-| Int*, UInt* | quantitative | dimension |
+| Int*, UInt* | quantitative | dimension if ≤16 distinct, else measure — see `classify_integers` |
 | Date, Datetime, Time, Duration | temporal | dimension |
 | Utf8, Categorical, Boolean, etc. | nominal | dimension |
 
+#### Integer classification (`classify_integers`)
+
+An integer column can be a dimension (a discrete key you group by) or a measure
+(a quantity you aggregate) depending on how many distinct values it holds. That
+count is cheap on a `DataFrame` but on a `LazyFrame` means running the plan — so
+the cost is yours to choose:
+
+| `classify_integers` | Data access | Rule |
+|---------------------|-------------|------|
+| `"sample"` (default) | first 1000 rows | exact distinct count; ≤16 → dimension, else measure |
+| `"scan"` | one full pass | approximate distinct count over the whole frame; correct even on sorted/clustered columns where the head sample lies |
+| `"measure"` | none | every integer is a measure — the escape hatch for lazy pipelines too expensive to touch |
+
+```python
+fields = get_fields(lf, classify_integers="scan")     # accurate, one pass
+fields = get_fields(lf, classify_integers="measure")  # zero data access
+```
+
+Floats and `Decimal` are always measures; `semanticType` stays `quantitative`
+for every integer regardless of role.
+
+#### Field overrides
+
+Force any per-column key with `field_overrides` (typed as `IMutFieldOverride`):
+
+```python
+fields = get_fields(df, field_overrides={
+    "user_id": {"analyticType": "dimension"},   # an ID, not a quantity
+    "rating":  {"semanticType": "ordinal"},
+    "revenue": {"aggName": "mean"},
+})
+```
+
+An override that pins `analyticType` also skips the distinct-count pass for that
+column, so overriding is free.
+
 ## How It Differs from PyGWalker
+
+### Field-inference parity
+
+The default `classify_integers="sample"` reproduces PyGWalker's field inference
+**exactly**: it classifies from the first 1000 rows (`df[:1000]`) and treats an
+integer with ≤16 distinct values as a dimension, otherwise a measure. Deliberate
+differences: `"scan"` and `"measure"` are polars-gw additions PyGWalker has no
+equivalent for, and polars-gw does **not** force geo-named columns
+(lat/long/latitude/longitude) to dimensions the way PyGWalker does.
+
+### Compute path
 
 PyGWalker (and panel-graphic-walker) always route through DuckDB — even for Polars DataFrames:
 
