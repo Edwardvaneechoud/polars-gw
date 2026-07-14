@@ -14,6 +14,7 @@ from polars_gw.types import (
     ViewQuery,
     WorkflowStep,
 )
+from polars_gw.viz import walk
 
 __all__ = [
     "Aggregator",
