@@ -1,0 +1,3 @@
+# generated benchmark data — regenerate with `python benchmark.py`
+bench_data.parquet
+*.parquet
