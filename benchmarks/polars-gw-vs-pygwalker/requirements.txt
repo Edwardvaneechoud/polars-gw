@@ -6,6 +6,7 @@ polars==1.39.3          # validated; 1.42.1 behaves identically (see the writeup
 numpy==2.4.6
 pyarrow==25.0.0         # ParquetWriter, streams the test file to disk
 matplotlib==3.10.7      # charts (visualize.py)
+psutil>=5.9             # cross-platform RSS sampling (Linux/macOS/Windows) for the memory-profile curve
 
 # --- the two tools under comparison ---
 polars-gw==0.1.4        # or install the local checkout: pip install -e ..

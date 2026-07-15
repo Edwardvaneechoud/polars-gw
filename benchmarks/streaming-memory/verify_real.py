@@ -8,6 +8,7 @@ import threading
 import time
 
 import polars as pl
+
 from polars_gw import execute_workflow
 
 PATH = os.environ["BENCH_PATH"]
@@ -45,6 +46,7 @@ print(lf.explain(optimized=True))
 
 # ---- run the REAL executor, measure RSS, compare fingerprint ----
 from polars_gw.executor import clear_cache
+
 clear_cache()
 samples, stop, t0 = [], threading.Event(), time.perf_counter()
 def s():

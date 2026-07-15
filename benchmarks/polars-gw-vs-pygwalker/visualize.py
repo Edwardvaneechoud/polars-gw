@@ -18,6 +18,7 @@ import os
 import sys
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
@@ -80,10 +81,12 @@ def _order(meta):
 def fig_rss_curves(d):
     meta, curves = d["meta"], d["curves"]
     fig, ax = plt.subplots(figsize=(10.5, 6.0))
+    plotted = 0
     for name in _order(meta):
         c = curves.get(name, {})
-        if c.get("error") or "curve" not in c:
+        if c.get("error") or not c.get("curve"):
             continue
+        plotted += 1
         st = STYLE[name]
         xs = [t for t, _ in c["curve"]]
         ys = [m for _, m in c["curve"]]
@@ -102,7 +105,11 @@ def fig_rss_curves(d):
     ax.set_ylabel("resident memory · RSS (MB)")
     ax.set_title("Memory profile: open the file and render the first full-scan chart")
     ax.set_ylim(bottom=0)
-    ax.legend(loc="upper right", fontsize=9)
+    if plotted:
+        ax.legend(loc="upper right", fontsize=9)
+    else:
+        ax.text(0.5, 0.5, "no RSS-over-time samples were captured\n(install psutil for the memory-profile curve)",
+                transform=ax.transAxes, ha="center", va="center", color=MUTED, fontsize=11)
     fig.text(0.5, -0.02, _subtitle(meta) + "   ·   ONE open→first-full-scan lifecycle (cf. chart 2 = whole-session peak)",
              ha="center", fontsize=8.5, color=MUTED)
     _save(fig, "1_rss_over_time")

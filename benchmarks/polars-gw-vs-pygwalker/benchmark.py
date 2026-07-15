@@ -177,11 +177,23 @@ def fingerprint(res) -> list:
 
 
 # ==========================================================================
-# RSS sampler
+# RSS sampler  (cross-platform: psutil if present, else Linux /proc, else rusage)
 # ==========================================================================
-def rss_mb() -> float:
-    with open("/proc/self/statm") as f:
-        return int(f.read().split()[1]) * PAGE / 1e6
+try:
+    import psutil
+
+    _PROC = psutil.Process()
+
+    def rss_mb() -> float:
+        return _PROC.memory_info().rss / 1e6
+except ImportError:
+    def rss_mb() -> float:
+        try:  # Linux
+            with open("/proc/self/statm") as f:
+                return int(f.read().split()[1]) * PAGE / 1e6
+        except OSError:  # macOS/other without psutil: monotonic high-water mark
+            rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            return rss / (1e3 if platform.system() == "Linux" else 1e6)
 
 
 class Sampler:
@@ -319,7 +331,7 @@ def child_curve(path_name: str, n_rows: int) -> dict:
             peak_mb=round(max(m for _, m in s.samples), 1),
             curve=[[round(t, 1), round(m, 1)] for t, m in s.samples],
         )
-    except (MemoryError, OSError) as exc:
+    except (MemoryError, OSError):
         out["error"] = "OOM"
     except ImportError:
         out["error"] = "MISSING_DEP"

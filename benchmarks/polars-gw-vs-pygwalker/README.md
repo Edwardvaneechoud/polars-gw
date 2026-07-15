@@ -14,7 +14,9 @@ python visualize.py                       # (re)draw charts from benchmark_resul
 ```
 
 `benchmark.py` writes **`benchmark_results.json`** and, unless `--no-viz`, calls
-`visualize.py`, which writes five PNG+SVG charts into **`charts/`**.
+`visualize.py`, which writes five PNG+SVG charts into **`charts/`**. Both the JSON and the
+`charts/` directory are generated outputs and are **git-ignored** — run the benchmark to produce
+them on your own machine; they are not committed.
 
 ## What it compares
 
