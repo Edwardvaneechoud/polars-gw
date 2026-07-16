@@ -302,7 +302,7 @@ def fig_scaling_latency(d):
     fig.suptitle("How each path scales — per-interaction latency vs data size",
                  fontsize=13, fontweight="bold", color=INK, y=1.02)
     fails = _scale_failures(scales)
-    foot = _subtitle_multi(meta) + ("   ·   " + "; ".join(fails) if fails else "")
+    foot = _subtitle_multi(meta, scales) + ("   ·   " + "; ".join(fails) if fails else "")
     fig.text(0.5, -0.02, foot, ha="center", fontsize=8.5, color=MUTED)
     fig.tight_layout()
     _save(fig, "6_latency_scaling")
@@ -342,14 +342,21 @@ def fig_scaling_rss(d):
     ax.set_title("Peak memory vs data size — eager tracks the data ~1:1, lazy flattens out")
     ax.legend(fontsize=9, loc="upper left")
     fails = _scale_failures(scales)
-    foot = _subtitle_multi(meta) + ("   ·   " + "; ".join(fails) if fails else "")
+    foot = _subtitle_multi(meta, scales) + ("   ·   " + "; ".join(fails) if fails else "")
     fig.text(0.5, -0.02, foot, ha="center", fontsize=8.5, color=MUTED)
     _save(fig, "7_rss_scaling")
 
 
-def _subtitle_multi(meta):
-    return (f"{meta['cores']} cores · polars {meta['polars']} · {meta['cache']} cache · "
-            f"median of {meta['trials']}×{meta['reps']} per scale")
+def _subtitle_multi(meta, scales=None):
+    combos = {(sc.get("trials", meta["trials"]), sc.get("reps", meta["reps"])) for sc in (scales or [])}
+    if len(combos) == 1:
+        t, r = next(iter(combos))
+        sampling = f"median of {t}×{r} per scale"
+    elif combos:
+        sampling = "median per scale (trials×reps vary — merged runs)"
+    else:
+        sampling = f"median of {meta['trials']}×{meta['reps']} per scale"
+    return f"{meta['cores']} cores · polars {meta['polars']} · {meta['cache']} cache · {sampling}"
 
 
 def _load(json_path):
@@ -379,7 +386,9 @@ def render(json_path=None):
         sc = usable[-1]
         if len(d["scales"]) > 1:
             print(f"  (charts 1-5 use the largest scale: {sc['rows']:,} rows)")
-        dv = {"meta": {**d["meta"], "rows": sc["rows"], "file_gb": sc["file_gb"]},
+        dv = {"meta": {**d["meta"], "rows": sc["rows"], "file_gb": sc["file_gb"],
+                       "trials": sc.get("trials", d["meta"]["trials"]),
+                       "reps": sc.get("reps", d["meta"]["reps"])},
               "results": sc["results"], "curves": sc["curves"]}
         fig_rss_curves(dv)
         fig_peak_rss(dv)

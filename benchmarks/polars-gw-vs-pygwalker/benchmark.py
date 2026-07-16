@@ -30,6 +30,7 @@ Usage:
   python benchmark.py                         # full ladder: 100K -> 200M rows (long run!)
   python benchmark.py --rows 20_000_000       # one scale, quick
   python benchmark.py --rows 1_000_000,100_000_000   # your own ladder
+  python benchmark.py --rows 500_000_000 --merge     # add one rung to existing results
   python benchmark.py --cold                  # evict page cache each rep (needs vmtouch/root)
   python benchmark.py --mem-limit-gb 4        # cap address space -> show the eager MemoryError
   python benchmark.py --path-timeout 600      # kill a path subprocess after 10 min (thrash guard)
@@ -425,6 +426,9 @@ def main() -> None:
                     help="kill any single path subprocess after this many seconds (swap-thrash guard)")
     ap.add_argument("--session", type=str, default="1,10,50,200,1000")
     ap.add_argument("--mix", type=float, default=0.8, help="fraction of a session that is SELECTIVE queries")
+    ap.add_argument("--merge", action="store_true",
+                    help="merge this run's scales into an existing benchmark_results.json "
+                         "instead of overwriting it (re-run scales are replaced)")
     ap.add_argument("--no-viz", action="store_true", help="skip chart generation")
     ap.add_argument("--keep-data", action="store_true", help="keep the generated parquet files")
     # child dispatch (hidden)
@@ -474,26 +478,71 @@ def main() -> None:
             while f.read(1 << 24):
                 pass
 
-        # trial-major so machine drift hits every path equally
+        # Trial-major so machine drift hits every path equally. A path that fails
+        # hard (TIMEOUT / OOM / KILLED) is skipped for its remaining trials at
+        # this scale — at near-RAM scales each doomed eager trial would otherwise
+        # burn the full --path-timeout again to learn the same thing.
         trials: dict[str, list[dict]] = {name: [] for name in NAMES}
+        failed: dict[str, dict] = {}
         for t in range(args.trials):
             print(f"  timing trial {t + 1}/{args.trials} ...", flush=True)
             for name in NAMES:
-                trials[name].append(spawn("timing", name, n, args))
+                if name in failed:
+                    trials[name].append(failed[name])
+                    continue
+                res = spawn("timing", name, n, args)
+                trials[name].append(res)
+                if res.get("error") in ("TIMEOUT", "OOM", "KILLED"):
+                    print(f"    !! {name}: {res['error']} — skipping its remaining trials at this scale",
+                          flush=True)
+                    failed[name] = res
 
         print("  capturing RSS-over-time curves ...", flush=True)
-        curves = {name: spawn("curve", name, n, args) for name in NAMES}
+        curves = {name: (dict(failed[name]) if name in failed else spawn("curve", name, n, args))
+                  for name in NAMES}
 
         R = aggregate(trials, qnames)
-        scales_out[str(n)] = {"rows": n, "file_gb": file_gb, "results": R, "curves": curves}
+        scales_out[str(n)] = {"rows": n, "file_gb": file_gb, "trials": args.trials, "reps": args.reps,
+                              "results": R, "curves": curves}
         _print_report(R, qnames, f"{n:,} rows / {file_gb:.2f} GB")
 
         if not args.keep_data:
             os.remove(PATH)
 
+    results_path = os.path.join(HERE, "benchmark_results.json")
+    if args.merge and os.path.exists(results_path):
+        with open(results_path) as f:
+            prior = json.load(f)
+        if "scales" in prior:
+            # comparability check: merged numbers only mean something on the same setup
+            now = {"cores": os.cpu_count(), "polars": pl.__version__,
+                   "cache": "cold" if args.cold else "warm", "platform": platform.platform()}
+            pm = prior.get("meta", {})
+            for k, v in now.items():
+                if pm.get(k) is not None and pm.get(k) != v:
+                    print(f"  !! merge warning: prior results have {k}={pm.get(k)!r}, this run {v!r} — "
+                          "cross-scale charts will mix setups")
+            merged = dict(prior["scales"])
+            merged.update(scales_out)  # re-run scales replace their prior entry
+            scales_out = merged
+            print(f"merged into existing results: {len(scales_out)} scale(s) total")
+        else:
+            print("  (existing results file has no 'scales' key — overwriting)")
+    elif os.path.exists(results_path):
+        try:
+            with open(results_path) as f:
+                prior_keys = set(json.load(f).get("scales", {}))
+        except (json.JSONDecodeError, OSError):
+            prior_keys = set()
+        dropped = prior_keys - {str(n) for n in scales}
+        if dropped:
+            print(f"note: overwriting previous results that also had scales "
+                  f"{sorted(int(s) for s in dropped)} — pass --merge to combine instead")
+
     out = {
         "meta": {
-            "rows_scales": scales, "cores": os.cpu_count(), "total_ram_gb": total_ram_gb,
+            "rows_scales": sorted(int(k) for k in scales_out),
+            "cores": os.cpu_count(), "total_ram_gb": total_ram_gb,
             "polars": pl.__version__, "trials": args.trials, "reps": args.reps,
             "cold": args.cold, "cache": "cold" if args.cold else "warm",
             "path_timeout_s": args.path_timeout,
@@ -503,9 +552,9 @@ def main() -> None:
         },
         "scales": scales_out,
     }
-    with open(os.path.join(HERE, "benchmark_results.json"), "w") as f:
+    with open(results_path, "w") as f:
         json.dump(out, f, indent=2)
-    print(f"\nwrote {os.path.join(HERE, 'benchmark_results.json')}")
+    print(f"\nwrote {results_path}")
 
     _print_scaling_summary(scales_out, qnames)
 
