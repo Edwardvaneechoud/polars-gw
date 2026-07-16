@@ -86,8 +86,9 @@ direct value labels, so identity never rests on color alone.
 - **`ts` is sorted**, so the selective filter skips row groups — a stated best case. An unsorted
   filter column would skip nothing.
 - **PyGWalker cannot accept a `LazyFrame`** (it needs a materialised frame or a SQL source), so
-  its eager path's `read_parquet` is mandatory, not a choice — which is exactly why a file larger
-  than RAM OOMs it. Run `--mem-limit-gb` to see that failure mode.
+  its eager path's `read_parquet` is mandatory, not a choice — which is why its ceiling is your
+  RAM: as the frame approaches available memory the OS spills to swap and it thrashes (a swapless
+  box OOM-kills, which is what `--mem-limit-gb` simulates by capping address space).
 - **Peak RSS is per-process and per-shape, and which fast path wins is hardware-dependent.**
   Report your own machine's numbers; do not inherit anyone else's.
 - Polars ships mimalloc, which does not return freed pages to the OS promptly, so RSS staying
@@ -112,9 +113,10 @@ comparable. Takeaways from *this* machine (yours will differ):
 - **polars-gw (LazyFrame) wins the selective query** — the common interactive slice — at ~7 ms,
   and ties the DuckDB Connector for lowest memory (1.18 GB, both lazy). It also reaches the first
   chart fastest of the Polars options (chart 4).
-- **The two eager paths cost ~4× the memory** (5.2 GB vs 1.2 GB) and, on a file larger than RAM,
-  **OOM** — PyGWalker's native parsers *require* a materialised frame, so that is their only door
-  in. `--mem-limit-gb 4` reproduces the failure.
+- **The two eager paths cost ~4× the memory** (5.2 GB vs 1.2 GB) — they hold the whole frame
+  resident, so their ceiling is your RAM: past it they thrash on swap (and, on a swapless box,
+  OOM-kill). PyGWalker's native parsers *require* a materialised frame, so that is their only door
+  in. `--mem-limit-gb 4` reproduces the hard-cap failure.
 - **PyGWalker's native Polars parser is the slowest path on every query** (671 / 1023 / 986 ms)
   *and* eager. polars-gw beats it on latency and memory simultaneously.
 - **The DuckDB Connector is genuinely strong** on full scans (198 ms, and the leanest single-query
