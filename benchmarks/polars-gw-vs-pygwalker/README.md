@@ -5,10 +5,12 @@ Two files. One runs the benchmark, one draws the charts.
 ```bash
 pip install -r requirements.txt          # or: uv pip install -r requirements.txt
 
-python benchmark.py                       # 20M rows, warm cache, all four paths
-python benchmark.py --rows 100000000      # the dramatic memory scale (needs ~10 GB free RAM)
+python benchmark.py                       # full ladder: 100K → 200M rows (an hour+; see below)
+python benchmark.py --rows 20_000_000     # one scale, quick
+python benchmark.py --rows 1_000_000,100_000_000   # your own ladder
 python benchmark.py --cold                # evict page cache each rep (needs vmtouch or root)
-python benchmark.py --mem-limit-gb 4      # cap address space → force the eager OOM
+python benchmark.py --mem-limit-gb 4      # cap address space → force the eager MemoryError
+python benchmark.py --path-timeout 600    # kill a thrashing path subprocess after 10 min
 
 python visualize.py                       # (re)draw charts from benchmark_results.json
 ```
@@ -64,7 +66,21 @@ every path, then the next), so page-cache warming, thread-pool spin-up and alloc
 leak between paths and machine drift hits everyone equally. Peak RSS is read from the kernel
 (`ru_maxrss`); the RSS-over-time curve is sampled from `/proc/self/statm` every 2 ms.
 
-## The five charts
+## Scales: when to use what
+
+`--rows` takes a comma-separated **ladder** (default `100_000,1_000_000,10_000_000,100_000_000,200_000_000`),
+and the whole benchmark runs once per scale. That turns "which is faster" into the more useful
+"which is faster *at my data size*" — the console prints a per-scale report plus a cross-scale
+summary of the fastest path per query, and charts 6–7 plot latency and peak RSS against rows.
+
+Practical notes for the full ladder:
+- each scale builds its own parquet (200M ≈ 7.1 GB) and deletes it afterwards unless `--keep-data`;
+  peak transient disk is the largest single file, not the sum.
+- at scales whose materialised frame approaches your RAM, the eager paths swap-thrash;
+  `--path-timeout` (default 900 s) converts "never finishes" into a reported `TIMEOUT` result.
+- expect the full ladder to take an hour-plus with default `--trials 3 --reps 5`.
+
+## The charts
 
 | file | what it shows |
 |------|---------------|
@@ -73,6 +89,10 @@ leak between paths and machine drift hits everyone equally. Peak RSS is read fro
 | `charts/3_per_interaction_latency.png` | steady-state ms per query, one panel per query shape, min–max whiskers |
 | `charts/4_time_to_first_chart.png` | load + first query — the latency the user experiences on open |
 | `charts/5_session_amortization.png` | `session(n)` for a realistic 80% selective / 20% full-scan mix, log-n |
+| `charts/6_latency_scaling.png` | **per-interaction latency vs rows** (log-log, one panel per query) — the "when to use what" chart |
+| `charts/7_rss_scaling.png` | **peak RSS vs rows** with the file size and your machine's RAM as reference lines |
+
+On a ladder run, charts 1–5 are rendered for the *largest* completed scale; 6–7 span the ladder.
 
 Colors are the data-viz skill's validated categorical set (blue / green / magenta / yellow),
 CVD-checked all-pairs; the two lower-contrast slots also carry a distinct line style + marker +

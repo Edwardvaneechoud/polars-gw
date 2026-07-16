@@ -257,17 +257,140 @@ def fig_amortization(d):
     _save(fig, "5_session_amortization")
 
 
-def render(json_path=None):
-    json_path = json_path or os.path.join(HERE, "benchmark_results.json")
+# ===========================================================================
+# 6. Latency vs scale — the "when to use what" chart
+# ===========================================================================
+def _scale_failures(scales):
+    out = []
+    for sc in scales:
+        for name, r in sc["results"].items():
+            if r.get("error"):
+                out.append(f"✗ {name} at {sc['rows']:,}: {r['error']}")
+    return out
+
+
+def fig_scaling_latency(d):
+    meta = d["meta"]
+    scales = sorted(d["scales"].values(), key=lambda s: s["rows"])
+    qs = meta["queries"]
+    fig, axes = plt.subplots(1, len(qs), figsize=(4.6 * len(qs), 5.0), sharey=True)
+    if len(qs) == 1:
+        axes = [axes]
+    for ax, q in zip(axes, qs, strict=False):
+        for name in _order(meta):
+            st = STYLE[name]
+            xs, ys = [], []
+            for sc in scales:
+                r = sc["results"].get(name, {})
+                if r.get("error") or not r.get("steady", {}).get(q):
+                    continue
+                med = r["steady"][q][0]
+                if med > 0:
+                    xs.append(sc["rows"])
+                    ys.append(med)
+            if xs:
+                ax.plot(xs, ys, color=st["color"], ls=st["ls"], lw=2.0,
+                        marker=st["marker"], markersize=6,
+                        markeredgecolor=SURFACE, markeredgewidth=0.7, label=name)
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        ax.set_title(q, fontsize=11.5)
+        ax.set_xlabel("rows (log)")
+        if ax is axes[0]:
+            ax.set_ylabel("ms / interaction (log)")
+            ax.legend(fontsize=8.5, loc="upper left")
+    fig.suptitle("How each path scales — per-interaction latency vs data size",
+                 fontsize=13, fontweight="bold", color=INK, y=1.02)
+    fails = _scale_failures(scales)
+    foot = _subtitle_multi(meta) + ("   ·   " + "; ".join(fails) if fails else "")
+    fig.text(0.5, -0.02, foot, ha="center", fontsize=8.5, color=MUTED)
+    fig.tight_layout()
+    _save(fig, "6_latency_scaling")
+
+
+# ===========================================================================
+# 7. Peak RSS vs scale — the feasibility cliff
+# ===========================================================================
+def fig_scaling_rss(d):
+    meta = d["meta"]
+    scales = sorted(d["scales"].values(), key=lambda s: s["rows"])
+    fig, ax = plt.subplots(figsize=(10.0, 5.8))
+    # reference: the file itself, and the machine's RAM
+    ax.plot([sc["rows"] for sc in scales], [sc["file_gb"] for sc in scales],
+            color=MUTED, ls=":", lw=1.4, label="Parquet file on disk")
+    if meta.get("total_ram_gb"):
+        ax.axhline(meta["total_ram_gb"], color=CRIT, lw=1.0, ls="--", alpha=0.65)
+        ax.text(scales[-1]["rows"], meta["total_ram_gb"] * 1.12,
+                f"machine RAM ({meta['total_ram_gb']:.0f} GB)", color=CRIT, fontsize=8.5, ha="right")
+    for name in _order(meta):
+        st = STYLE[name]
+        xs, ys = [], []
+        for sc in scales:
+            r = sc["results"].get(name, {})
+            if r.get("error") or not r.get("peak_rss_gb"):
+                continue
+            xs.append(sc["rows"])
+            ys.append(r["peak_rss_gb"])
+        if xs:
+            ax.plot(xs, ys, color=st["color"], ls=st["ls"], lw=2.0,
+                    marker=st["marker"], markersize=6,
+                    markeredgecolor=SURFACE, markeredgewidth=0.7, label=name)
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel("rows (log)")
+    ax.set_ylabel("peak resident memory (GB, log)")
+    ax.set_title("Peak memory vs data size — eager tracks the data ~1:1, lazy flattens out")
+    ax.legend(fontsize=9, loc="upper left")
+    fails = _scale_failures(scales)
+    foot = _subtitle_multi(meta) + ("   ·   " + "; ".join(fails) if fails else "")
+    fig.text(0.5, -0.02, foot, ha="center", fontsize=8.5, color=MUTED)
+    _save(fig, "7_rss_scaling")
+
+
+def _subtitle_multi(meta):
+    return (f"{meta['cores']} cores · polars {meta['polars']} · {meta['cache']} cache · "
+            f"median of {meta['trials']}×{meta['reps']} per scale")
+
+
+def _load(json_path):
     with open(json_path) as f:
         d = json.load(f)
+    if "scales" in d:
+        return d
+    # legacy single-scale format -> wrap it
+    n = d["meta"].get("rows", 0)
+    return {
+        "meta": {**d["meta"], "rows_scales": [n]},
+        "scales": {str(n): {"rows": n, "file_gb": d["meta"].get("file_gb", 0.0),
+                            "results": d["results"], "curves": d["curves"]}},
+    }
+
+
+def render(json_path=None):
+    json_path = json_path or os.path.join(HERE, "benchmark_results.json")
+    d = _load(json_path)
     _style()
     print("rendering charts:")
-    fig_rss_curves(d)
-    fig_peak_rss(d)
-    fig_latency(d)
-    fig_first_chart(d)
-    fig_amortization(d)
+
+    # per-scale charts (1-5) use the LARGEST scale with at least one surviving path
+    usable = [sc for sc in sorted(d["scales"].values(), key=lambda s: s["rows"])
+              if any(not r.get("error") for r in sc["results"].values())]
+    if usable:
+        sc = usable[-1]
+        if len(d["scales"]) > 1:
+            print(f"  (charts 1-5 use the largest scale: {sc['rows']:,} rows)")
+        dv = {"meta": {**d["meta"], "rows": sc["rows"], "file_gb": sc["file_gb"]},
+              "results": sc["results"], "curves": sc["curves"]}
+        fig_rss_curves(dv)
+        fig_peak_rss(dv)
+        fig_latency(dv)
+        fig_first_chart(dv)
+        fig_amortization(dv)
+
+    # cross-scale charts (6-7) need at least two scales
+    if len(d["scales"]) > 1:
+        fig_scaling_latency(d)
+        fig_scaling_rss(d)
     print(f"done -> {os.path.join(HERE, 'charts')}/")
 
 

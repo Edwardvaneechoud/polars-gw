@@ -22,13 +22,22 @@ meaningful if the answers agree; a mismatch is printed loudly and the run is
 flagged. Each path runs in a FRESH SUBPROCESS so page-cache, thread-pool and
 allocator state never leak between paths, and peak RSS is measured, not estimated.
 
+`--rows` takes a comma-separated LADDER of scales, so one run answers the real
+question — *when* to use what — instead of a single point. Charts 6 and 7 plot
+latency and peak memory against data size across the ladder.
+
 Usage:
-  python benchmark.py                         # 20M rows, warm cache, all paths
-  python benchmark.py --rows 100000000        # the dramatic memory scale
+  python benchmark.py                         # full ladder: 100K -> 200M rows (long run!)
+  python benchmark.py --rows 20_000_000       # one scale, quick
+  python benchmark.py --rows 1_000_000,100_000_000   # your own ladder
   python benchmark.py --cold                  # evict page cache each rep (needs vmtouch/root)
-  python benchmark.py --mem-limit-gb 4        # cap address space -> show the eager OOM
+  python benchmark.py --mem-limit-gb 4        # cap address space -> show the eager MemoryError
+  python benchmark.py --path-timeout 600      # kill a path subprocess after 10 min (thrash guard)
   python benchmark.py --no-viz                # skip chart generation
   python visualize.py                         # (re)draw charts from benchmark_results.json
+
+Disk note: each scale builds its own parquet file (200M rows ~ 7.1 GB); files are
+deleted after their scale finishes unless --keep-data.
 """
 from __future__ import annotations
 
@@ -45,8 +54,17 @@ import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PATH = os.path.join(HERE, "bench_data.parquet")
 PAGE = os.sysconf("SC_PAGE_SIZE")
+
+
+def data_path(n_rows: int) -> str:
+    """Per-scale data file, so a ladder run can build/evict each scale independently."""
+    return os.path.join(HERE, f"bench_data_{n_rows}.parquet")
+
+
+# Module-level so every helper sees the current scale's file. The parent sets it
+# per ladder rung; a child sets it once from its --rows before running.
+PATH = data_path(0)
 
 # (label, is_lazy) — is_lazy drives the amortization table.
 PATHS = [
@@ -341,71 +359,32 @@ def child_curve(path_name: str, n_rows: int) -> dict:
 # ==========================================================================
 # PARENT
 # ==========================================================================
-def spawn(mode: str, path_name: str, args) -> dict:
-    cmd = [sys.executable, os.path.abspath(__file__), "--_child", mode, "--_cpath", path_name,
-           "--rows", str(args.rows), "--reps", str(args.reps),
-           "--mem-limit-gb", str(args.mem_limit_gb)]
-    if args.cold:
-        cmd.append("--cold")
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    line = next((l for l in proc.stdout.splitlines() if l.startswith("@@JSON@@")), None)
-    if line:
-        return json.loads(line[len("@@JSON@@"):])
-    return {"path": path_name, "error": "KILLED", "error_detail": proc.stderr.strip()[-200:],
+def _err_record(path_name: str, error: str, detail: str) -> dict:
+    return {"path": path_name, "error": error, "error_detail": detail,
             "one_time_s": 0.0, "peak_rss_gb": 0.0, "first_ms": {}, "steady_ms": {}, "fingerprint": {}}
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--rows", type=int, default=20_000_000)
-    ap.add_argument("--trials", type=int, default=3, help="independent subprocesses per path")
-    ap.add_argument("--reps", type=int, default=5, help="timed iterations within each subprocess (medianed)")
-    ap.add_argument("--cold", action="store_true", help="evict page cache before each rep")
-    ap.add_argument("--mem-limit-gb", type=float, default=0.0, help="cap address space; demonstrates the eager OOM")
-    ap.add_argument("--session", type=str, default="1,10,50,200,1000")
-    ap.add_argument("--mix", type=float, default=0.8, help="fraction of a session that is SELECTIVE queries")
-    ap.add_argument("--no-viz", action="store_true", help="skip chart generation")
-    ap.add_argument("--keep-data", action="store_true", help="keep the generated parquet file")
-    # child dispatch (hidden)
-    ap.add_argument("--_child", choices=["timing", "curve"], help=argparse.SUPPRESS)
-    ap.add_argument("--_cpath", help=argparse.SUPPRESS)
-    args = ap.parse_args()
+def spawn(mode: str, path_name: str, n_rows: int, args) -> dict:
+    cmd = [sys.executable, os.path.abspath(__file__), "--_child", mode, "--_cpath", path_name,
+           "--rows", str(n_rows), "--reps", str(args.reps),
+           "--mem-limit-gb", str(args.mem_limit_gb)]
+    if args.cold:
+        cmd.append("--cold")
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=args.path_timeout)
+    except subprocess.TimeoutExpired:
+        # A RESULT, not a crash: at scales near RAM the eager paths swap-thrash
+        # rather than finishing. The timeout converts "unusably slow" into data.
+        return _err_record(path_name, "TIMEOUT",
+                           f"exceeded --path-timeout {args.path_timeout:.0f}s (likely swap-thrash at this scale)")
+    line = next((ln for ln in proc.stdout.splitlines() if ln.startswith("@@JSON@@")), None)
+    if line:
+        return json.loads(line[len("@@JSON@@"):])
+    return _err_record(path_name, "KILLED", proc.stderr.strip()[-200:])
 
-    if args._child == "timing":
-        print("@@JSON@@" + json.dumps(child_timing(args._cpath, args.rows, args.reps, args.cold, args.mem_limit_gb)))
-        return
-    if args._child == "curve":
-        print("@@JSON@@" + json.dumps(child_curve(args._cpath, args.rows)))
-        return
 
-    # -------------------- parent --------------------
-    import polars as pl
-    build(PATH, args.rows)
-    qnames = list(payloads(args.rows))
-    print(f"file: {os.path.getsize(PATH)/1e9:.2f} GB on disk, {args.rows:,} rows | polars {pl.__version__}")
-    print(f"cores: {os.cpu_count()}  trials: {args.trials}  reps: {args.reps}  "
-          f"cache: {'COLD' if args.cold else 'warm'}")
-    if args.cold and not drop_page_cache(PATH):
-        print("  !! cannot evict page cache (need vmtouch or root) — results are WARM")
-    print()
-
-    # warm the cache once, equally for all paths
-    with open(PATH, "rb") as f:
-        while f.read(1 << 24):
-            pass
-
-    # ---- timing: trial-major so machine drift hits every path equally
-    trials: dict[str, list[dict]] = {n: [] for n in NAMES}
-    for t in range(args.trials):
-        print(f"  timing trial {t + 1}/{args.trials} ...", flush=True)
-        for name in NAMES:
-            trials[name].append(spawn("timing", name, args))
-
-    # ---- RSS-over-time lifecycle curve, once per path
-    print("  capturing RSS-over-time curves ...", flush=True)
-    curves = {name: spawn("curve", name, args) for name in NAMES}
-
-    # ---- aggregate
+def aggregate(trials: dict[str, list[dict]], qnames: list[str]) -> dict:
+    """Median/min/max per path across the trial subprocesses."""
     def stat(runs, getter):
         vals = [getter(r) for r in runs if not r.get("error")]
         return (statistics.median(vals), min(vals), max(vals)) if vals else (0.0, 0.0, 0.0)
@@ -426,26 +405,109 @@ def main() -> None:
         fps = {q: {tuple(r["fingerprint"][q]) for r in runs if not r.get("error")} for q in qnames}
         rec["fp"] = {q: (list(fps[q])[0] if len(fps[q]) == 1 else None) for q in qnames}
         R[name] = rec
+    return R
+
+
+DEFAULT_LADDER = "100_000,1_000_000,10_000_000,100_000_000,200_000_000"
+
+
+def main() -> None:
+    global PATH
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--rows", type=str, default=DEFAULT_LADDER,
+                    help="comma-separated ladder of row counts (underscores ok); one value = single scale")
+    ap.add_argument("--trials", type=int, default=3, help="independent subprocesses per path, per scale")
+    ap.add_argument("--reps", type=int, default=5, help="timed iterations within each subprocess (medianed)")
+    ap.add_argument("--cold", action="store_true", help="evict page cache before each rep")
+    ap.add_argument("--mem-limit-gb", type=float, default=0.0,
+                    help="cap address space; forces the eager MemoryError failure mode")
+    ap.add_argument("--path-timeout", type=float, default=900.0,
+                    help="kill any single path subprocess after this many seconds (swap-thrash guard)")
+    ap.add_argument("--session", type=str, default="1,10,50,200,1000")
+    ap.add_argument("--mix", type=float, default=0.8, help="fraction of a session that is SELECTIVE queries")
+    ap.add_argument("--no-viz", action="store_true", help="skip chart generation")
+    ap.add_argument("--keep-data", action="store_true", help="keep the generated parquet files")
+    # child dispatch (hidden)
+    ap.add_argument("--_child", choices=["timing", "curve"], help=argparse.SUPPRESS)
+    ap.add_argument("--_cpath", help=argparse.SUPPRESS)
+    args = ap.parse_args()
+
+    if args._child:  # children always receive a single scale in --rows
+        n = int(args.rows)
+        PATH = data_path(n)
+        if args._child == "timing":
+            res = child_timing(args._cpath, n, args.reps, args.cold, args.mem_limit_gb)
+        else:
+            res = child_curve(args._cpath, n)
+        print("@@JSON@@" + json.dumps(res))
+        return
+
+    # -------------------- parent --------------------
+    import polars as pl
+    scales = [int(s) for s in args.rows.split(",") if s.strip()]
+    qnames = list(payloads(scales[0]))
+    try:
+        import psutil
+        total_ram_gb = psutil.virtual_memory().total / 1e9
+    except ImportError:
+        total_ram_gb = None
+
+    print(f"scales: {', '.join(f'{n:,}' for n in scales)}")
+    print(f"polars {pl.__version__} | cores {os.cpu_count()}"
+          + (f" | RAM {total_ram_gb:.0f} GB" if total_ram_gb else "")
+          + f" | trials {args.trials} x reps {args.reps} | cache {'COLD' if args.cold else 'warm'}"
+          + f" | path-timeout {args.path_timeout:.0f}s")
+
+    scales_out: dict[str, dict] = {}
+    for n in scales:
+        PATH = data_path(n)
+        print("\n" + "#" * 78)
+        print(f"# SCALE: {n:,} rows")
+        print("#" * 78)
+        build(PATH, n)
+        file_gb = os.path.getsize(PATH) / 1e9
+        if args.cold and not drop_page_cache(PATH):
+            print("  !! cannot evict page cache (need vmtouch or root) — results are WARM")
+
+        # warm the cache once, equally for all paths
+        with open(PATH, "rb") as f:
+            while f.read(1 << 24):
+                pass
+
+        # trial-major so machine drift hits every path equally
+        trials: dict[str, list[dict]] = {name: [] for name in NAMES}
+        for t in range(args.trials):
+            print(f"  timing trial {t + 1}/{args.trials} ...", flush=True)
+            for name in NAMES:
+                trials[name].append(spawn("timing", name, n, args))
+
+        print("  capturing RSS-over-time curves ...", flush=True)
+        curves = {name: spawn("curve", name, n, args) for name in NAMES}
+
+        R = aggregate(trials, qnames)
+        scales_out[str(n)] = {"rows": n, "file_gb": file_gb, "results": R, "curves": curves}
+        _print_report(R, qnames, f"{n:,} rows / {file_gb:.2f} GB")
+
+        if not args.keep_data:
+            os.remove(PATH)
 
     out = {
         "meta": {
-            "rows": args.rows, "file_gb": os.path.getsize(PATH) / 1e9, "cores": os.cpu_count(),
+            "rows_scales": scales, "cores": os.cpu_count(), "total_ram_gb": total_ram_gb,
             "polars": pl.__version__, "trials": args.trials, "reps": args.reps,
             "cold": args.cold, "cache": "cold" if args.cold else "warm",
+            "path_timeout_s": args.path_timeout,
             "session_ns": [int(x) for x in args.session.split(",")], "mix": args.mix,
             "queries": qnames, "headline": HEADLINE, "names": NAMES, "is_lazy": IS_LAZY,
             "platform": platform.platform(),
         },
-        "results": R, "curves": curves,
+        "scales": scales_out,
     }
     with open(os.path.join(HERE, "benchmark_results.json"), "w") as f:
         json.dump(out, f, indent=2)
     print(f"\nwrote {os.path.join(HERE, 'benchmark_results.json')}")
 
-    _print_report(R, out["meta"])
-
-    if not args.keep_data:
-        os.remove(PATH)
+    _print_scaling_summary(scales_out, qnames)
 
     if not args.no_viz:
         try:
@@ -455,13 +517,12 @@ def main() -> None:
             print(f"  (viz skipped: {exc}; run `python visualize.py` after installing matplotlib)")
 
 
-def _print_report(R: dict, meta: dict) -> None:
-    qnames = meta["queries"]
+def _print_report(R: dict, qnames: list[str], subtitle: str) -> None:
     w = 32
     ok = [n for n in NAMES if not R[n].get("error")]
 
     print("\n" + "=" * 78)
-    print("0. CORRECTNESS — do the paths agree?")
+    print(f"0. CORRECTNESS — do the paths agree?  [{subtitle}]")
     print("=" * 78)
     for q in qnames:
         seen = {n: R[n]["fp"][q] for n in ok}
@@ -498,6 +559,57 @@ def _print_report(R: dict, meta: dict) -> None:
                 row += f"{med:>10.1f}ms {f'({lo:.0f}-{hi:.0f})':>10}"
         print(row)
     print("\n  If two ranges OVERLAP, do not claim one path is faster.")
+
+
+SHORT = {
+    "polars-gw (LazyFrame)": "pgw-lazy",
+    "polars-gw (DataFrame, eager)": "pgw-eager",
+    "pygwalker + DuckDB Connector": "duckdb",
+    "pygwalker (native Polars)": "gw-polars",
+}
+
+
+def _print_scaling_summary(scales_out: dict[str, dict], qnames: list[str]) -> None:
+    """The 'when to use what' table: per scale, fastest path per query + the memory split."""
+    if len(scales_out) < 2:
+        return
+    print("\n" + "=" * 96)
+    print("SCALING SUMMARY — fastest path per query at each scale (see charts 6-7)")
+    print("=" * 96)
+    print(f"{'rows':>13}{'file':>9}" + "".join(f"{q:>24}" for q in qnames) + f"{'RSS lazy|eager':>18}")
+    print("-" * 96)
+    failures: list[str] = []
+    for key in sorted(scales_out, key=int):
+        sc = scales_out[key]
+        R = sc["results"]
+        row = f"{sc['rows']:>13,}{sc['file_gb']:>7.2f}GB"
+        for q in qnames:
+            best, best_ms = None, None
+            for name in NAMES:
+                r = R[name]
+                if r.get("error"):
+                    continue
+                ms = r["steady"][q][0]
+                if best_ms is None or ms < best_ms:
+                    best, best_ms = name, ms
+            row += f"{SHORT.get(best, '—'):>14}{f'{best_ms:,.1f}ms' if best_ms is not None else '':>10}"
+        lazy_peaks = [R[n]["peak_rss_gb"] for n in NAMES if IS_LAZY[n] and not R[n].get("error")]
+        eager_peaks = [R[n]["peak_rss_gb"] for n in NAMES if not IS_LAZY[n] and not R[n].get("error")]
+        lz = f"{max(lazy_peaks):.1f}" if lazy_peaks else "—"
+        eg = f"{max(eager_peaks):.1f}" if eager_peaks else "—"
+        row += f"{lz + '|' + eg + ' GB':>18}"
+        print(row)
+        for name in NAMES:
+            if R[name].get("error"):
+                failures.append(f"  ✗ {name} at {sc['rows']:,} rows: {R[name]['error']}"
+                                f" ({R[name].get('error_detail', '')[:70]})")
+    if failures:
+        print("\nPaths that did not complete:")
+        for f_line in failures:
+            print(f_line)
+    print("\n  Winners flip with scale — that is the point. Small data: everything is fast and")
+    print("  eager is fine. As rows approach RAM, the eager paths fall off a cliff (swap-thrash")
+    print("  or timeout) while the lazy paths keep working. Charts 6-7 draw this.")
 
 
 if __name__ == "__main__":
