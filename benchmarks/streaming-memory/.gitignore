@@ -1,3 +1,0 @@
-# the 3.56 GB benchmark data file — regenerate with build_data.py
-bench_data.parquet
-*.parquet
