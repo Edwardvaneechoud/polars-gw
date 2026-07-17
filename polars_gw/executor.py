@@ -41,14 +41,12 @@ def _log(level: int, msg: str, *args: Any) -> None:
 DEFAULT_MAX_ROWS: int = 1_000_000
 
 _CACHE_MAX_ENTRIES: int = 64
-# Each entry pairs the result rows with a *validator*: a weakref to the source
-# frame for id()-keyed entries (see below), or ``None`` for self-validating
-# content-keyed entries.  The weakref lets us detect CPython recycling an id()
-# onto a brand-new frame and serving it a dead frame's rows.
+# Each entry pairs the result rows with a validator: a weakref to the source frame
+# for id()-keyed entries (guards against CPython recycling an id() onto a new
+# frame), or ``None`` for self-validating content-keyed entries.
 _cache: dict[str, tuple[weakref.ref | None, list[dict[str, Any]]]] = {}
-# Guards only the tiny evict+store mutation — never the collect().  The FastAPI
-# ``/api/compute`` endpoint is a sync def, so uvicorn runs it in a threadpool and
-# hits this global dict concurrently.
+# Guards only the tiny evict+store mutation, never the collect() — the FastAPI
+# /api/compute endpoint is sync, so uvicorn hits this dict from a threadpool.
 _cache_lock = threading.Lock()
 
 
@@ -61,28 +59,23 @@ def _cache_key(prefix: str, payload: IDataQueryPayload, max_rows: int | None) ->
 def _content_key(df: pl.DataFrame | pl.LazyFrame) -> str | None:
     """Content hash of a *scan-based* LazyFrame's query plan, else ``None``.
 
-    A serialized scan plan (parquet/csv/…) is tiny (~1 KB) and deterministic, so
-    two fresh ``scan_parquet(path)`` frames with the same source hash to the same
-    key and share one cache entry — unlike ``id()``, which recycles.  Eager
-    DataFrames and *in-memory* LazyFrames return ``None`` (they take the
-    id()+weakref path): serializing them would copy the whole dataset.
-
-    The ``"DF ["`` marker (polars' in-memory frame node) is correctness-safe in
-    both directions — a false positive falls to the id() path (correct, no
-    content hit); a false negative pays one expensive serialize but still keys on
-    real content.  Any explain/serialize failure or version drift returns
-    ``None``, so misclassification only ever costs performance, never correctness.
+    A serialized scan plan is tiny and deterministic, so two fresh
+    ``scan_parquet(path)`` frames hash equal and share one cache entry — unlike
+    ``id()``, which recycles.  Eager DataFrames and in-memory LazyFrames (the
+    ``"DF ["`` plan marker) return ``None`` and take the id()+weakref path;
+    serializing them would copy the whole dataset.  Misclassification only ever
+    costs performance: any failure here falls back to id(), never a stale hit.
     """
     if not isinstance(df, pl.LazyFrame):
         return None
     try:
-        plan = df.explain(optimized=False)  # ~0.03 ms, does not materialise data
+        plan = df.explain(optimized=False)  # cheap; does not materialise data
     except Exception:  # noqa: BLE001 - any failure just disables content-keying
         return None
     if "DF [" in plan:
         return None
     try:
-        blob = df.serialize(format="binary")  # ~0.01 ms / ~1 KB for a scan
+        blob = df.serialize(format="binary")
     except Exception:  # noqa: BLE001 - unserialisable plan -> fall back to id()
         return None
     return hashlib.md5(blob, usedforsecurity=False).hexdigest()
@@ -93,6 +86,76 @@ def clear_cache() -> None:
     _cache.clear()
 
 
+def build_query(
+    df: pl.DataFrame | pl.LazyFrame,
+    payload: IDataQueryPayload,
+    *,
+    max_rows: int | None = DEFAULT_MAX_ROWS,
+) -> pl.LazyFrame:
+    """Build the lazy query plan for a Graphic Walker payload without collecting.
+
+    Applies every workflow step (filter, view, sort, transform) plus the
+    payload's limit/offset and the ``max_rows`` cap, returning the uncollected
+    plan so callers can ``.explain()`` or ``.collect()`` it themselves.
+    :func:`execute_workflow` wraps this with result caching and JSON sanitisation.
+
+    Args: see :func:`execute_workflow`.
+    """
+    lf = df.lazy()
+
+    workflow = payload.get("workflow", [])
+    _log(logging.INFO, "build_query: %d step(s), max_rows=%s", len(workflow), max_rows)
+    _log(logging.DEBUG, "payload=%r", payload)
+
+    for i, step in enumerate(workflow):
+        step_type = step.get("type")
+        if step_type == "filter":
+            filters = step.get("filters", [])
+            _log(
+                logging.INFO,
+                "  step %d: filter — %s",
+                i,
+                ", ".join(f"{f.get('fid')} {f.get('rule', {}).get('type')}" for f in filters) or "(none)",
+            )
+            lf = _apply_filters(lf, filters)
+        elif step_type == "view":
+            queries = step.get("query", [])
+            _log(
+                logging.INFO,
+                "  step %d: view — %s",
+                i,
+                ", ".join(_describe_view_query(q) for q in queries) or "(none)",
+            )
+            lf = _apply_view_queries(lf, queries)
+        elif step_type == "sort":
+            by = step.get("by", [])
+            direction = step.get("sort", "ascending")
+            _log(logging.INFO, "  step %d: sort — by=%s %s", i, by, direction)
+            lf = _apply_sort(lf, by, direction)
+        elif step_type == "transform":
+            transforms = step.get("transform", [])
+            _log(
+                logging.INFO,
+                "  step %d: transform — %s",
+                i,
+                ", ".join(f"{t.get('expression', {}).get('op')}->{t.get('key')}" for t in transforms) or "(none)",
+            )
+            lf = _apply_transforms(lf, transforms)
+        else:
+            _log(logging.WARNING, "  step %d: unknown step type %r", i, step_type)
+
+    limit = payload.get("limit")
+    if limit is not None:
+        offset = payload.get("offset", 0) or 0
+        _log(logging.INFO, "  slice: offset=%d, limit=%d", offset, limit)
+        lf = lf.slice(offset, limit)
+
+    if max_rows is not None:
+        lf = lf.head(max_rows)
+
+    return lf
+
+
 def execute_workflow(
     df: pl.DataFrame | pl.LazyFrame,
     payload: IDataQueryPayload,
@@ -101,37 +164,28 @@ def execute_workflow(
 ) -> list[dict[str, Any]]:
     """Execute a Graphic Walker IDataQueryPayload against a Polars DataFrame.
 
-    The entire workflow is built as a lazy query plan and collected once at
-    the end, letting Polars optimise predicate push-down and projection.
-
-    Results are cached by payload so that duplicate queries (common when
-    reshuffling fields in the UI) return instantly.  For a LazyFrame backed by a
-    file scan the key is the serialized scan plan, so two fresh
-    ``scan_parquet(path)`` frames share an entry; the tradeoff is that if the
-    file at that path changes on disk mid-session, a stale result may be served
-    until the entry is evicted (the cache holds at most 64 entries).
+    Builds the lazy plan via :func:`build_query`, collects it once, and returns
+    JSON-safe row dicts.  Results are cached by payload so duplicate queries
+    (common when reshuffling fields in the UI) return instantly; a scan-based
+    LazyFrame is keyed by its serialized scan plan, so a file changing on disk
+    mid-session may serve a stale result until the entry is evicted (max 64).
 
     Args:
         df: The source DataFrame (or LazyFrame) to query.
-        payload: A Graphic Walker IDataQueryPayload dict with keys:
-            - workflow: list of workflow steps
-            - limit: optional row limit
-            - offset: optional row offset
-        max_rows: Hard cap on the number of rows returned.  Applied after all
-            workflow steps and payload limit/offset.  Set to ``None`` to
-            disable.  Defaults to :data:`DEFAULT_MAX_ROWS` (1 000 000).
+        payload: A Graphic Walker IDataQueryPayload dict (workflow steps plus
+            optional limit/offset).
+        max_rows: Hard cap on rows returned, applied after all workflow steps
+            and the payload limit/offset.  ``None`` disables it.  Defaults to
+            :data:`DEFAULT_MAX_ROWS` (1 000 000).
 
     Returns:
         A list of row dicts (IRow[]) suitable for returning to Graphic Walker.
     """
     rid_token = _request_id.set(uuid.uuid4().hex[:8])
     try:
-        # Prefer a content key for scan-based LazyFrames so fresh scan_parquet(...)
-        # temporaries share a cache entry (id() would recycle).  Everything else
-        # uses id()+weakref: if df is later garbage-collected and a new frame
-        # reuses its id(), wref() returns the dead frame (or None) rather than the
-        # new df, so the identity check fails and we recompute instead of serving
-        # stale rows.
+        # Scan-based LazyFrames key on content so fresh scan_parquet(...) temporaries
+        # share an entry; everything else keys on id()+weakref, which detects df being
+        # GC'd and its id() recycled onto a new frame (else we'd serve stale rows).
         validator: pl.DataFrame | pl.LazyFrame | None
         ckey = _content_key(df)
         if ckey is not None:
@@ -143,65 +197,13 @@ def execute_workflow(
         entry = _cache.get(key)
         if entry is not None:
             wref, cached = entry
-            # wref is None => self-validating content key (added below); otherwise
-            # the entry is only valid if the weakref still points at *this* df.
+            # Content-key entries (wref is None) self-validate; id() entries are
+            # only valid while the weakref still points at *this* df.
             if wref is None or wref() is validator:
                 _log(logging.INFO, "execute_workflow: cache hit (%d row(s))", len(cached))
                 return cached
 
-        lf = df
-
-        workflow = payload.get("workflow", [])
-        _log(logging.INFO, "execute_workflow: %d step(s), max_rows=%s", len(workflow), max_rows)
-        _log(logging.DEBUG, "payload=%r", payload)
-
-        for i, step in enumerate(workflow):
-            step_type = step.get("type")
-            if step_type == "filter":
-                filters = step.get("filters", [])
-                _log(
-                    logging.INFO,
-                    "  step %d: filter — %s",
-                    i,
-                    ", ".join(f"{f.get('fid')} {f.get('rule', {}).get('type')}" for f in filters) or "(none)",
-                )
-                lf = _apply_filters(lf, filters)
-            elif step_type == "view":
-                queries = step.get("query", [])
-                _log(
-                    logging.INFO,
-                    "  step %d: view — %s",
-                    i,
-                    ", ".join(_describe_view_query(q) for q in queries) or "(none)",
-                )
-                lf = _apply_view_queries(lf, queries)
-            elif step_type == "sort":
-                by = step.get("by", [])
-                direction = step.get("sort", "ascending")
-                _log(logging.INFO, "  step %d: sort — by=%s %s", i, by, direction)
-                lf = _apply_sort(lf, by, direction)
-            elif step_type == "transform":
-                transforms = step.get("transform", [])
-                _log(
-                    logging.INFO,
-                    "  step %d: transform — %s",
-                    i,
-                    ", ".join(f"{t.get('expression', {}).get('op')}->{t.get('key')}" for t in transforms) or "(none)",
-                )
-                lf = _apply_transforms(lf, transforms)
-            else:
-                _log(logging.WARNING, "  step %d: unknown step type %r", i, step_type)
-
-        limit = payload.get("limit")
-        if limit is not None:
-            offset = payload.get("offset", 0) or 0
-            _log(logging.INFO, "  slice: offset=%d, limit=%d", offset, limit)
-            lf = lf.slice(offset, limit)
-
-        if max_rows is not None:
-            lf = lf.head(max_rows)
-
-        result = _sanitize_for_json(lf)
+        result = _sanitize_for_json(build_query(df, payload, max_rows=max_rows))
 
         if max_rows is not None and len(result) == max_rows:
             _log(
@@ -217,9 +219,8 @@ def execute_workflow(
             try:
                 wref = weakref.ref(df)
             except TypeError:
-                # Frame type doesn't support weak references (e.g. an exotic
-                # subclass); skip caching rather than store an id() entry we
-                # can't validate against recycling.
+                # Frame doesn't support weakrefs; skip caching rather than store an
+                # id() entry we can't validate against recycling.
                 return result
         else:
             wref = None
@@ -606,21 +607,17 @@ def _build_transform_expr(expression: TransformExpression, schema: pl.Schema) ->
         return None
 
     if op == "bin":
-        # GW `bin`: equal-width binning, returns per-row [lowerBound, upperBound]
-        # in the field's native numeric scale.  The reference implementation is
-        # graphic-walker/src/lib/execExp.ts — it emits a 2-tuple per row and
-        # the frontend renders it as the chart's category label.
+        # GW `bin`: equal-width binning, per-row [lowerBound, upperBound] in the
+        # field's native scale (ref: graphic-walker/src/lib/execExp.ts).
         field = _param_to_str(params[0]) if params else None
         num_bins = expression.get("num", 10)
         if field and field in schema:
             col = pl.col(field)
             col_min = col.min()
             step = (col.max() - col_min) / num_bins
-            # Clip so col.max() falls into the last bin rather than a phantom
-            # bin N (mirrors `if (bIndex === binSize) bIndex = binSize - 1;`).
-            # strict=False so a degenerate column (constant/single-row → step==0
-            # → 0/0 == NaN in the eagerly-evaluated then-branch) yields null
-            # instead of raising; the when() still selects .otherwise(0).
+            # clip: keep col.max() in the last bin instead of a phantom bin N.
+            # strict=False: a degenerate column (step==0 → 0/0 == NaN) yields null
+            # instead of raising, and the when() still selects .otherwise(0).
             idx = (
                 pl.when(step > 0)
                 .then(((col - col_min) / step).floor().cast(pl.Int64, strict=False).clip(0, num_bins - 1))
@@ -637,20 +634,17 @@ def _build_transform_expr(expression: TransformExpression, schema: pl.Schema) ->
             return pl.col(field).log(base=base_map[op])
 
     elif op == "binCount":
-        # GW `binCount`: equal-frequency (quantile) binning, returns a
-        # 1-indexed bucket rank in 1..num.  Per execExp.ts, rows are sorted by
-        # value and split into `num` contiguous groups of ~N/num rows each.
+        # GW `binCount`: equal-frequency (quantile) binning, 1-indexed bucket rank
+        # in 1..num — rows sorted by value, split into `num` contiguous groups.
         field = _param_to_str(params[0]) if params else None
         num_bins = expression.get("num", 10)
         if field and field in schema:
             col = pl.col(field)
-            # ordinal rank breaks ties deterministically by input order, which
-            # matches the reference's stable sort.
+            # ordinal rank breaks ties by input order, matching the stable sort.
             order_index = col.rank(method="ordinal") - 1  # 0-indexed
             group_size = col.count() / num_bins
-            # strict=False so an empty/degenerate column (group_size==0 → 0/0 ==
-            # NaN in the eagerly-evaluated then-branch) yields null instead of
-            # raising; the when() still selects .otherwise(1).
+            # strict=False: a degenerate column (group_size==0 → 0/0 == NaN) yields
+            # null instead of raising, and the when() still selects .otherwise(1).
             return (
                 pl.when(group_size > 0)
                 .then((order_index / group_size).floor().cast(pl.Int64, strict=False).clip(0, num_bins - 1) + 1)
