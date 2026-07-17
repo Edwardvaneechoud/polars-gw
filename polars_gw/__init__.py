@@ -33,7 +33,7 @@ __all__ = [
     "get_fields",
     "walk",
 ]
-__version__ = "0.1.4"
+__version__ = "0.1.5"
 
 
 def __getattr__(name: str):
