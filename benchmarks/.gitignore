@@ -1,0 +1,5 @@
+# generated benchmark outputs — regenerate by running the scripts
+*.parquet
+**/charts/
+*_results.json
+results.json
