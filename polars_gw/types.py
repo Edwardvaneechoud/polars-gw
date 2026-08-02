@@ -1,10 +1,13 @@
-"""Type hints for Graphic Walker payload structures (GW 0.4.77)."""
+"""Type hints for Graphic Walker payload structures (GW 0.4.77).
+
+The payload TypedDicts are plain dicts at runtime; the annotations exist only
+for mypy / pyright.  Optional fields use the two-class pattern (a required base
+plus a ``total=False`` subclass) because ``typing.NotRequired`` needs 3.11.
+"""
 
 from typing import Any, Literal, TypedDict
 
-# ---------------------------------------------------------------------------
 # Literal discriminator types
-# ---------------------------------------------------------------------------
 
 FilterRuleType = Literal["range", "temporal range", "one of", "not in", "regexp"]
 
@@ -20,11 +23,14 @@ WorkflowStepType = Literal["filter", "view", "sort", "transform"]
 SemanticType = Literal["quantitative", "temporal", "nominal", "ordinal"]
 AnalyticType = Literal["measure", "dimension"]
 
-# How integer columns are split into dimension vs measure (see get_fields):
-#   "sample"  — approx_n_unique over the first 1000 rows (PyGWalker df[:1000] window)
-#   "scan"    — approx_n_unique over the whole frame (one pass; correct when sorted)
-#   "measure" — every integer is a measure; no data access
 ClassifyIntegers = Literal["sample", "scan", "measure"]
+"""How integer columns split into dimension vs measure (see get_fields).
+
+``sample`` runs approx_n_unique over the first 1000 rows (PyGWalker's
+``df[:1000]`` window), ``scan`` runs it over the whole frame in one pass
+(correct when sorted), and ``measure`` makes every integer a measure without
+touching the data.
+"""
 
 TransformOp = Literal[
     "one", "expr", "paint", "bin", "log", "log2", "log10",
@@ -42,15 +48,7 @@ DateTimeFeatureKey = Literal[
     "dayOfYear", "dayOfWeek", "weekday", "hour", "minute", "second",
 ]
 
-# ---------------------------------------------------------------------------
-# Payload TypedDicts — machine-checked types for GW JSON structures.
-# These are plain dicts at runtime (zero overhead); the type annotations
-# are consumed by mypy / pyright for static checking.
-#
-# For TypedDicts with optional fields, we use the two-class inheritance
-# pattern (required base + total=False subclass) for Python 3.10 compat
-# (typing.NotRequired was added in 3.11).
-# ---------------------------------------------------------------------------
+# Payload TypedDicts
 
 # --- Filter types ---
 
@@ -128,8 +126,7 @@ ViewQuery = AggQuery | FoldQuery | BinQuery | RawQuery
 class _TransformExpressionRequired(TypedDict):
     op: TransformOp
     params: list[Any]
-    # Note: GW payload also includes an "as" key (Python keyword).
-    # It is accessed via .get("as", ...) at runtime.
+    # GW also sends an "as" key (a Python keyword); read via .get("as", ...).
 
 
 class TransformExpression(_TransformExpressionRequired, total=False):

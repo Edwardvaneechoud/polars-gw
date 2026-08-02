@@ -26,19 +26,19 @@ _FLOAT_DTYPES = (pl.Float32, pl.Float64)
 
 _TEMPORAL_DTYPES = (pl.Date, pl.Datetime, pl.Time, pl.Duration)
 
-# PyGWalker parity constants (pygwalker/data_parsers/base.py + polars_parser.py):
-# fields are inferred from ``df[:1000]`` and an integer column with
-# ``<= 16`` distinct values is a dimension, otherwise a measure.
+# PyGWalker parity: infer from df[:1000]; an integer with <= 16 distinct values is a dimension.
 _SAMPLE_ROWS = 1000
 _DIMENSION_MAX_CARDINALITY = 16
 _INT_MODES: tuple[ClassifyIntegers, ...] = ("sample", "scan", "measure")
 
-# analyticType used for integer columns when the distinct-count pass raises.
-# "measure" mirrors classify_integers="measure" and graphic-walker's native
-# numeric default; it avoids labeling an unknown-cardinality integer a
-# dimension (which would drop it on an axis and trigger a group-by over
-# millions of groups downstream).
 _COUNT_FAILURE_ANALYTIC: AnalyticType = "measure"
+"""analyticType for integer columns when the distinct-count pass raises.
+
+``measure`` mirrors ``classify_integers="measure"`` and graphic-walker's native
+numeric default.  It avoids labelling an unknown-cardinality integer a
+dimension, which would drop it on an axis and trigger a group-by over millions
+of groups downstream.
+"""
 
 
 def get_fields(
@@ -101,9 +101,7 @@ def get_fields(
             ", ".join(sorted(unknown)),
         )
 
-    # Integer columns whose analyticType is NOT already pinned by an override.
-    # Pinned columns are skipped entirely — no data access for them (so the
-    # distinct-count cost "disappears" wherever the caller overrides it).
+    # Integers not already pinned by an override; pinned ones cost no data access.
     int_cols_to_count = [
         name
         for name, dtype in schema.items()
@@ -114,8 +112,7 @@ def get_fields(
     fields: list[IMutField] = []
     for name, dtype in schema.items():
         semantic, analytic = _dtype_classify(dtype)
-        # Cardinality-driven analyticType for counted integer columns; set as
-        # the pre-merge base so an explicit field override still wins below.
+        # Pre-merge base, so an explicit field override still wins below.
         if name in int_analytic:
             analytic = int_analytic[name]
         field: IMutField = {
@@ -128,8 +125,7 @@ def get_fields(
         }
         if name in overrides:
             field.update(overrides[name])
-        # aggName defaults to "sum" on measures, but a user-supplied aggName
-        # (in either analytic role) is left untouched.
+        # Defaults to "sum" on measures; a user-supplied aggName is left untouched.
         if field["analyticType"] == "measure" and "aggName" not in field:
             field["aggName"] = "sum"
         fields.append(field)
@@ -197,8 +193,7 @@ def _dtype_classify(dtype: pl.DataType) -> tuple[SemanticType, AnalyticType]:
     inference, or a user override). ``semanticType`` is the real final value.
     """
     if dtype in _INTEGER_DTYPES:
-        # analyticType is decided by cardinality in get_fields; "dimension" is
-        # a placeholder. semanticType is quantitative (matches PyGWalker).
+        # "dimension" is a placeholder; get_fields decides it by cardinality.
         return "quantitative", "dimension"
     if dtype in _FLOAT_DTYPES or str(dtype).startswith("Decimal"):
         return "quantitative", "measure"
