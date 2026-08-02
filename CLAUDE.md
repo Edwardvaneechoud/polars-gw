@@ -42,7 +42,7 @@ cd js && npm install && npm run build
 
 ### JS Bundle (`js/`)
 
-Pre-built Graphic Walker + React IIFE bundle shipped inside the wheel so users don't need Node. Built with esbuild + tailwindcss. React 19.2.0 is pinned exactly (GW 0.5.0 runtime check). Output goes to `polars_gw/viz_assets/`.
+Pre-built Graphic Walker + React IIFE bundle shipped inside the wheel so users don't need Node. Built with esbuild + tailwindcss. React 19.2.0 is pinned exactly (GW 0.5.2 runtime check). Output goes to `polars_gw/viz_assets/`.
 
 ### Key Patterns
 

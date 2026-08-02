@@ -41,14 +41,9 @@ def _log(level: int, msg: str, *args: Any) -> None:
 DEFAULT_MAX_ROWS: int = 1_000_000
 
 _CACHE_MAX_ENTRIES: int = 64
-# Each entry pairs the result rows with a *validator*: a weakref to the source
-# frame for id()-keyed entries (see below), or ``None`` for self-validating
-# content-keyed entries.  The weakref lets us detect CPython recycling an id()
-# onto a brand-new frame and serving it a dead frame's rows.
+# Maps key -> (validator, rows); validator is None for self-validating content keys.
 _cache: dict[str, tuple[weakref.ref | None, list[dict[str, Any]]]] = {}
-# Guards only the tiny evict+store mutation — never the collect().  The FastAPI
-# ``/api/compute`` endpoint is a sync def, so uvicorn runs it in a threadpool and
-# hits this global dict concurrently.
+# Guards the evict+store mutation only — /api/compute runs in uvicorn's threadpool.
 _cache_lock = threading.Lock()
 
 
@@ -126,12 +121,7 @@ def execute_workflow(
     """
     rid_token = _request_id.set(uuid.uuid4().hex[:8])
     try:
-        # Prefer a content key for scan-based LazyFrames so fresh scan_parquet(...)
-        # temporaries share a cache entry (id() would recycle).  Everything else
-        # uses id()+weakref: if df is later garbage-collected and a new frame
-        # reuses its id(), wref() returns the dead frame (or None) rather than the
-        # new df, so the identity check fails and we recompute instead of serving
-        # stale rows.
+        # Content key for scan-based frames; otherwise id()+weakref, so a recycled id() can't serve stale rows.
         validator: pl.DataFrame | pl.LazyFrame | None
         ckey = _content_key(df)
         if ckey is not None:
@@ -143,8 +133,7 @@ def execute_workflow(
         entry = _cache.get(key)
         if entry is not None:
             wref, cached = entry
-            # wref is None => self-validating content key (added below); otherwise
-            # the entry is only valid if the weakref still points at *this* df.
+            # None => content-keyed; otherwise the weakref must still point at this df.
             if wref is None or wref() is validator:
                 _log(logging.INFO, "execute_workflow: cache hit (%d row(s))", len(cached))
                 return cached
@@ -217,9 +206,7 @@ def execute_workflow(
             try:
                 wref = weakref.ref(df)
             except TypeError:
-                # Frame type doesn't support weak references (e.g. an exotic
-                # subclass); skip caching rather than store an id() entry we
-                # can't validate against recycling.
+                # Not weak-referenceable; skip caching rather than store an unvalidatable entry.
                 return result
         else:
             wref = None
@@ -255,9 +242,7 @@ def _describe_view_query(query: ViewQuery) -> str:
     return f"{op}?"
 
 
-# ---------------------------------------------------------------------------
 # Filters
-# ---------------------------------------------------------------------------
 
 
 def _apply_filters(lf: pl.LazyFrame | pl.DataFrame, filters: list[VisFilter]) -> pl.LazyFrame:
@@ -296,8 +281,7 @@ def _build_filter_expr(fid: str, rule: FilterRule, schema: pl.Schema) -> pl.Expr
 
     elif rule_type == "temporal range":
         low, high = value[0], value[1]
-        # Optional timezone/offset in minutes — shift the user-supplied bounds
-        # so they align with the column's UTC epoch-ms representation.
+        # Shift the user-supplied bounds so they align with the column's UTC epoch-ms.
         offset_min = rule.get("offset") or 0
         offset_ms = offset_min * 60_000
         dtype = schema[fid]
@@ -336,9 +320,7 @@ def _build_filter_expr(fid: str, rule: FilterRule, schema: pl.Schema) -> pl.Expr
     return None
 
 
-# ---------------------------------------------------------------------------
 # View queries (aggregate, fold, bin, raw)
-# ---------------------------------------------------------------------------
 
 
 def _apply_view_queries(lf: pl.LazyFrame | pl.DataFrame, queries: list[ViewQuery]) -> pl.LazyFrame:
@@ -360,9 +342,7 @@ def _apply_aggregate(lf: pl.LazyFrame | pl.DataFrame, query: AggQuery) -> pl.Laz
     group_by = [g for g in query.get("groupBy", []) if g in schema]
     measures = query.get("measures", [])
 
-    # No measures requested: Graphic Walker uses this to fetch the distinct
-    # values of a dimension (e.g. to populate a filter dropdown).  Without
-    # this branch we would fall through and return the entire DataFrame.
+    # No measures = GW fetching a dimension's distinct values (e.g. a filter dropdown).
     if not measures and group_by:
         return lf.select(group_by).unique(maintain_order=True)
 
@@ -372,14 +352,12 @@ def _apply_aggregate(lf: pl.LazyFrame | pl.DataFrame, query: AggQuery) -> pl.Laz
         agg = m.get("agg")
         alias = m.get("asFieldKey") or field or agg or "value"
 
-        # SQL-style count(*): Graphic Walker sends field="*" (or empty) for
-        # "count all rows".  Polars' pl.len() is the direct equivalent.
+        # GW sends field="*" (or empty) for SQL-style count(*).
         if agg == "count" and (not field or field == "*"):
             agg_exprs.append(pl.len().alias(alias))
             continue
 
-        # agg="expr": arbitrary SQL expression, e.g. "SUM(a) / SUM(b)".  The
-        # expression is taken from the measure's "expression" or "expr" field.
+        # agg="expr": arbitrary SQL, e.g. "SUM(a) / SUM(b)".
         if agg == "expr":
             sql = m.get("expression") or m.get("expr") or field
             parsed = _parse_sql_expr(sql)
@@ -576,17 +554,67 @@ def _param_display_offset(params: list) -> int:
     return 0
 
 
+def _bin_expr(field: str, num_bins: int) -> pl.Expr:
+    """Equal-width binning, returning a per-row ``[lower, upper]`` pair.
+
+    Mirrors ``bin()`` in graphic-walker's ``src/lib/execExp.ts``, which emits a
+    2-tuple in the field's native numeric scale for the frontend to render as
+    the chart's category label.
+
+    Nulls follow the reference's JS coercion, where ``null`` compares and
+    arithmetics as 0: they widen the bounds towards zero and then land in
+    whichever bin contains 0.  Leaving them null would emit a ``[null, null]``
+    bucket that corrupts the frontend's histogram reconstruction, which reads
+    bin bounds as numbers.  NaN and inf rows cast to null and collapse to the
+    first bin, matching ``if (Number.isNaN(bIndex)) bIndex = 0``.  Degenerate
+    columns (constant, single-row, all-null) have step == 0 and collapse to a
+    single bucket instead of blowing up the Int64 cast.
+    """
+    col = pl.col(field).fill_null(0)
+    col_min = col.min()
+    step = (col.max() - col_min) / num_bins
+    # clip() keeps col.max() in the last bin rather than a phantom bin N.
+    idx = (
+        pl.when(step > 0)
+        .then(((col - col_min) / step).floor().cast(pl.Int64, strict=False).fill_null(0).clip(0, num_bins - 1))
+        .otherwise(0)
+    )
+    lower = (col_min + idx * step).cast(pl.Float64)
+    upper = (col_min + (idx + 1) * step).cast(pl.Float64)
+    return pl.concat_list([lower, upper])
+
+
+def _bin_count_expr(field: str, num_bins: int) -> pl.Expr:
+    """Equal-frequency (quantile) binning, returning a 1-indexed rank in 1..num.
+
+    Mirrors ``binCount()`` in graphic-walker's ``src/lib/execExp.ts``: rows are
+    sorted by value and split into ``num`` contiguous groups of ~N/num rows.
+
+    The reference sorts with ``(a, b) => a.val - b.val``, so nulls order as 0
+    and still occupy a rank slot — hence the same ``fill_null(0)`` as
+    :func:`_bin_expr`, and a group size over the full row count.
+    """
+    col = pl.col(field).fill_null(0)
+    # Ordinal rank breaks ties by input order, matching the reference's stable sort.
+    order_index = col.rank(method="ordinal") - 1
+    group_size = pl.len() / num_bins
+    # Non-strict cast: the then-branch is eager, so an empty frame yields NaN here.
+    return (
+        pl.when(group_size > 0)
+        .then((order_index / group_size).floor().cast(pl.Int64, strict=False).clip(0, num_bins - 1) + 1)
+        .otherwise(1)
+    )
+
+
 def _build_transform_expr(expression: TransformExpression, schema: pl.Schema) -> pl.Expr | None:
     op = expression.get("op")
     params = expression.get("params", [])
 
-    # Graphic Walker's "Row Count" field: op="one" creates a constant-1 column
-    # that is then summed in a downstream aggregate to yield row counts.
+    # GW's "Row Count" field: a constant 1, summed by a downstream aggregate.
     if op == "one":
         return pl.lit(1, dtype=pl.Int64)
 
-    # op="expr": arbitrary expression supplied as a SQL string.  Look for it
-    # in the standard params shape first, otherwise in a top-level field.
+    # Arbitrary SQL string: check the params shape first, then top-level fields.
     if op == "expr":
         sql = None
         for p in params:
@@ -598,37 +626,15 @@ def _build_transform_expr(expression: TransformExpression, schema: pl.Schema) ->
             sql = expression.get("sql") or expression.get("expression")
         return _parse_sql_expr(sql)
 
-    # op="paint": value/colour mapping used by GW's paint tool.  Mapping
-    # structure is complex and undocumented; log and return input unchanged
-    # (null expression) so the workflow doesn't crash.
+    # The paint tool's mapping structure is undocumented — skip rather than crash.
     if op == "paint":
         _log(logging.WARNING, "  paint transform is not supported — skipping")
         return None
 
     if op == "bin":
-        # GW `bin`: equal-width binning, returns per-row [lowerBound, upperBound]
-        # in the field's native numeric scale.  The reference implementation is
-        # graphic-walker/src/lib/execExp.ts — it emits a 2-tuple per row and
-        # the frontend renders it as the chart's category label.
         field = _param_to_str(params[0]) if params else None
-        num_bins = expression.get("num", 10)
         if field and field in schema:
-            col = pl.col(field)
-            col_min = col.min()
-            step = (col.max() - col_min) / num_bins
-            # Clip so col.max() falls into the last bin rather than a phantom
-            # bin N (mirrors `if (bIndex === binSize) bIndex = binSize - 1;`).
-            # strict=False so a degenerate column (constant/single-row → step==0
-            # → 0/0 == NaN in the eagerly-evaluated then-branch) yields null
-            # instead of raising; the when() still selects .otherwise(0).
-            idx = (
-                pl.when(step > 0)
-                .then(((col - col_min) / step).floor().cast(pl.Int64, strict=False).clip(0, num_bins - 1))
-                .otherwise(0)
-            )
-            lower = (col_min + idx * step).cast(pl.Float64)
-            upper = (col_min + (idx + 1) * step).cast(pl.Float64)
-            return pl.concat_list([lower, upper])
+            return _bin_expr(field, expression.get("num", 10))
 
     elif op in ("log", "log2", "log10"):
         field = _param_to_str(params[0]) if params else None
@@ -637,30 +643,12 @@ def _build_transform_expr(expression: TransformExpression, schema: pl.Schema) ->
             return pl.col(field).log(base=base_map[op])
 
     elif op == "binCount":
-        # GW `binCount`: equal-frequency (quantile) binning, returns a
-        # 1-indexed bucket rank in 1..num.  Per execExp.ts, rows are sorted by
-        # value and split into `num` contiguous groups of ~N/num rows each.
         field = _param_to_str(params[0]) if params else None
-        num_bins = expression.get("num", 10)
         if field and field in schema:
-            col = pl.col(field)
-            # ordinal rank breaks ties deterministically by input order, which
-            # matches the reference's stable sort.
-            order_index = col.rank(method="ordinal") - 1  # 0-indexed
-            group_size = col.count() / num_bins
-            # strict=False so an empty/degenerate column (group_size==0 → 0/0 ==
-            # NaN in the eagerly-evaluated then-branch) yields null instead of
-            # raising; the when() still selects .otherwise(1).
-            return (
-                pl.when(group_size > 0)
-                .then((order_index / group_size).floor().cast(pl.Int64, strict=False).clip(0, num_bins - 1) + 1)
-                .otherwise(1)
-            )
+            return _bin_count_expr(field, expression.get("num", 10))
 
     elif op == "dateTimeDrill":
-        # Truncate a datetime to the start of the requested unit (year, month,
-        # day, …).  Returns a datetime/date — not an integer component (that's
-        # what dateTimeFeature is for).
+        # Truncates to the unit's start; dateTimeFeature is the one returning components.
         field = _param_to_str(params[0]) if params else None
         time_unit = _param_to_str(params[1]) if len(params) > 1 else "year"
         if field and field in schema:
@@ -670,9 +658,7 @@ def _build_transform_expr(expression: TransformExpression, schema: pl.Schema) ->
                 return None
             display_offset = _param_display_offset(params)
             expr = pl.col(field)
-            # Shift into the user's display TZ so day/week/etc. boundaries
-            # align with the local calendar, then truncate, then shift back so
-            # the returned values stay in the source column's timezone.
+            # Truncate in the user's display TZ, then shift back to the source timezone.
             if display_offset:
                 shift = pl.duration(minutes=display_offset)
                 expr = (expr - shift).dt.truncate(interval) + shift

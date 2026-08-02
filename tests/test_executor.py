@@ -637,6 +637,61 @@ class TestTransform:
         # 20 rows / 4 bins = 5 rows per bin, 1-indexed.
         assert qs == [1] * 5 + [2] * 5 + [3] * 5 + [4] * 5
 
+    def test_bin_transform_nulls_match_gw(self):
+        """Nulls follow GW's JS coercion, where `null` compares and arithmetics as 0.
+
+        graphic-walker scans for min/max with relational operators, so a null
+        widens the bounds towards zero and then lands in whichever bin contains
+        0.  Expected values come from the reference implementation
+        (@kanaries/graphic-walker 0.5.2, dist/lib/execExp.js) run on the same
+        input.  Emitting a [null, null] bucket instead would break the
+        frontend's histogram reconstruction, which reads bin bounds as numbers.
+        """
+
+        def _bin(values, as_name, num=10):
+            return [
+                r[as_name]
+                for r in execute_workflow(
+                    pl.DataFrame({"val": values}, schema={"val": pl.Float64}),
+                    {"workflow": [{"type": "transform", "transform": [
+                        {"key": as_name, "expression": {"op": "bin", "params": ["val"], "as": as_name, "num": num}}
+                    ]}]},
+                )
+            ]
+
+        # The null drags min down to 0: bounds [0, 40], step 4.
+        assert _bin([10, 20, 30, None, 40], "b_pos") == [[8, 12], [20, 24], [28, 32], [0, 4], [36, 40]]
+        # The null drags max up to 0: bounds [-100, 0], step 10, null in the last bin.
+        assert _bin([-100, -50, -10, None], "b_neg") == [[-100, -90], [-50, -40], [-10, 0], [-10, 0]]
+        # NaN collapses to the first bin, mirroring `if (Number.isNaN(bIndex)) bIndex = 0`.
+        assert _bin([0, 10, None, float("nan")], "b_nan") == [[0, 1], [9, 10], [0, 1], [0, 1]]
+
+    def test_bin_count_transform_nulls_match_gw(self):
+        """GW `binCount` sorts with `a.val - b.val`, so nulls order as 0.
+
+        Nulls also occupy a rank slot, so the group size divides the full row
+        count rather than the non-null count.  Expected values come from the
+        reference implementation run on the same input.
+        """
+
+        def _bin_count(values, as_name, num=10):
+            return [
+                r[as_name]
+                for r in execute_workflow(
+                    pl.DataFrame({"val": values}, schema={"val": pl.Float64}),
+                    {"workflow": [{"type": "transform", "transform": [
+                        {"key": as_name, "expression": {"op": "binCount", "params": ["val"], "as": as_name, "num": num}}
+                    ]}]},
+                )
+            ]
+
+        # 5 rows / 10 bins: the null sorts first and takes bucket 1.
+        assert _bin_count([10, 20, 30, None, 40], "bc_pos") == [3, 5, 7, 1, 9]
+        # The null sorts between 0 and 5, not last.
+        assert _bin_count([-5, 0, 5, None], "bc_zero") == [1, 3, 8, 6]
+        # 8 rows / 4 bins = 2 per bucket, with the null ranked first.
+        assert _bin_count([1, 2, 3, 4, None, 6, 7, 8], "bc_num4", num=4) == [1, 2, 2, 3, 1, 3, 4, 4]
+
     def test_bin_transform_degenerate(self):
         """GW `bin` (equal-width) must not raise on a degenerate column.
 
@@ -663,9 +718,9 @@ class TestTransform:
         result = _bin(pl.DataFrame({"val": [7]}), "bin_single")
         assert result == [{"val": 7, "bin_single": [7.0, 7.0]}]
 
-        # all-null: bounds are null, single (null) bucket, no raise.
+        # all-null: GW's scan coerces null to 0, so both bounds collapse to 0.
         result = _bin(pl.DataFrame({"val": [None, None]}, schema={"val": pl.Float64}), "bin_null")
-        assert all(r["bin_null"] == [None, None] for r in result)
+        assert all(r["bin_null"] == [0.0, 0.0] for r in result)
 
         # empty frame: no rows, no raise.
         result = _bin(pl.DataFrame({"val": []}, schema={"val": pl.Float64}), "bin_empty")
@@ -696,9 +751,9 @@ class TestTransform:
         result = _bin_count(pl.DataFrame({"val": [7]}), "bc_single")
         assert result == [{"val": 7, "bc_single": 1}]
 
-        # all-null → group_size == 0, every row collapses to bucket 1.
+        # all-null → nulls rank as 0 but still consume slots: 2 rows / 4 bins.
         result = _bin_count(pl.DataFrame({"val": [None, None]}, schema={"val": pl.Float64}), "bc_null")
-        assert all(r["bc_null"] == 1 for r in result)
+        assert [r["bc_null"] for r in result] == [1, 3]
 
         # empty frame: no rows, no raise.
         result = _bin_count(pl.DataFrame({"val": []}, schema={"val": pl.Float64}), "bc_empty")
