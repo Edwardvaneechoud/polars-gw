@@ -1,0 +1,23 @@
+# Benchmark dependencies — pinned to the versions these charts were produced with.
+# Install:  pip install -r requirements.txt   (or `uv pip install -r requirements.txt`)
+
+# --- core the script imports directly ---
+polars==1.39.3          # validated; 1.42.1 measured identical on this benchmark
+numpy==2.4.6
+pyarrow==25.0.0         # ParquetWriter, streams the test file to disk
+matplotlib==3.10.7      # charts (visualize.py)
+psutil>=5.9             # cross-platform RSS sampling (Linux/macOS/Windows) for the memory-profile curve
+
+# --- the two tools under comparison ---
+polars-gw==0.1.4        # or install the local checkout: pip install -e ..
+pygwalker==0.5.0.1
+
+# --- query engine for the polars-gw and pygwalker-Connector paths ---
+duckdb==1.5.4
+
+# --- required only for the "pygwalker + DuckDB Connector" path ---
+# pygwalker's Connector opens the parquet through SQLAlchemy, which needs the
+# duckdb dialect. Drop these two lines if you skip that comparison.
+duckdb-engine==0.17.0
+sqlalchemy==2.0.51
+pandas                  # pygwalker returns pandas frames from some paths

@@ -1,6 +1,6 @@
 """polars-gw: Native Polars computation engine for Graphic Walker."""
 
-from polars_gw.executor import DEFAULT_MAX_ROWS, execute_workflow
+from polars_gw.executor import DEFAULT_MAX_ROWS, build_query, execute_workflow
 from polars_gw.fields import get_fields
 from polars_gw.types import (
     Aggregator,
@@ -28,6 +28,7 @@ __all__ = [
     "SemanticType",
     "ViewQuery",
     "WorkflowStep",
+    "build_query",
     "execute_workflow",
     "get_fields",
     "walk",

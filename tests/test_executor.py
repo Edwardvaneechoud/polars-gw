@@ -7,7 +7,15 @@ import weakref
 import polars as pl
 import pytest
 
-from polars_gw.executor import _cache, _cache_key, _content_key, clear_cache, execute_workflow
+from polars_gw.executor import (
+    _cache,
+    _cache_key,
+    _content_key,
+    _sanitize_for_json,
+    build_query,
+    clear_cache,
+    execute_workflow,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -1159,3 +1167,67 @@ class TestResultCache:
         assert _content_key(pl.scan_parquet(p)) == _content_key(pl.scan_parquet(p))
         assert _content_key(pl.LazyFrame({"v": [1]})) is None  # in-memory -> skip serialize
         assert _content_key(pl.DataFrame({"v": [1]})) is None  # eager -> skip
+
+
+# ---------------------------------------------------------------------------
+# build_query — the uncollected-plan half of execute_workflow
+# ---------------------------------------------------------------------------
+
+
+class TestBuildQuery:
+    """build_query builds the plan only: no collect, no cache, no JSON sanitising."""
+
+    def test_returns_uncollected_lazyframe_from_dataframe(self):
+        plan = build_query(_sample_df(), {"workflow": []})
+        assert isinstance(plan, pl.LazyFrame)  # eager input normalised to a plan
+
+    def test_lazyframe_input_stays_lazy(self):
+        plan = build_query(_sample_df().lazy(), {"workflow": []})
+        assert isinstance(plan, pl.LazyFrame)
+
+    def test_plan_is_inspectable_without_materialising(self):
+        # The whole point of the split: you can look at the plan without running it.
+        plan = build_query(_sample_df(), _SUM_PAYLOAD)
+        assert isinstance(plan.explain(), str)
+
+    def test_applies_filter_and_aggregate(self):
+        payload = {
+            "workflow": [
+                {"type": "filter", "filters": [
+                    {"fid": "city", "rule": {"type": "one of", "value": ["Amsterdam"]}}
+                ]},
+                {"type": "view", "query": [
+                    {"op": "aggregate", "groupBy": [],
+                     "measures": [{"field": "sales", "agg": "sum", "asFieldKey": "s"}]}
+                ]},
+            ]
+        }
+        assert build_query(_sample_df(), payload).collect().to_dicts() == [{"s": 250}]
+
+    def test_max_rows_capped_in_plan(self):
+        plan = build_query(_sample_df(), {"workflow": []}, max_rows=2)
+        assert plan.collect().height == 2
+
+    def test_max_rows_none_leaves_plan_uncapped(self):
+        plan = build_query(_sample_df(), {"workflow": []}, max_rows=None)
+        assert plan.collect().height == 5
+
+    def test_limit_offset_applied_to_plan(self):
+        plan = build_query(_sample_df(), {"workflow": [], "limit": 2, "offset": 1})
+        rows = plan.collect().to_dicts()
+        assert len(rows) == 2
+        assert rows[0]["city"] == "Berlin"
+
+    def test_does_not_touch_cache(self):
+        clear_cache()
+        build_query(_sample_df(), _SUM_PAYLOAD).collect()
+        assert len(_cache) == 0  # plan building never populates the result cache
+
+    def test_matches_execute_workflow(self):
+        # execute_workflow == sanitize(build_query(...)); assert they agree.
+        df = _temporal_df()  # has a Date column, so sanitising is not a no-op
+        payload = {"workflow": [
+            {"type": "view", "query": [{"op": "aggregate", "groupBy": ["date"],
+                "measures": [{"field": "value", "agg": "sum", "asFieldKey": "s"}]}]}
+        ]}
+        assert _sanitize_for_json(build_query(df, payload)) == execute_workflow(df, payload)

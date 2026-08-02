@@ -83,6 +83,9 @@ include = [
 [tool.ruff]
 line-length = 120
 target-version = "py310"
+# Benchmark/investigation tooling is isolated from the package: not shipped in the
+# wheel and not linted as package code.
+extend-exclude = ["benchmarks"]
 
 [tool.ruff.lint]
 select = ["F", "E", "W", "I", "UP", "B"]
